@@ -29,8 +29,7 @@ const axios = require("axios");
 
 const app = express();
 app.use(express.json());
-const app = express();
-app.use(express.json());
+
 
 /* 🔒 COOKIE SAVE */
 app.use((req, res, next) => {

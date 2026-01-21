@@ -24,35 +24,65 @@
  */
 
 require("dotenv").config();
-// ================= HARD BOOT LOCK =================
-const REQUIRED_ENVS = [
-  "APP_ACCESS_SECRET",
-  "MASSIVE_API_KEY"
-];
 
-for (const k of REQUIRED_ENVS) {
-  if (!process.env[k] || !String(process.env[k]).trim()) {
-    console.error(`❌ FATAL: Missing required env ${k}`);
-    process.exit(1); // HARD STOP
-  }
-}
 const express = require("express");
 const axios = require("axios");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
 
-
-
-
 /* =========================
-   🔒 ALGTP ACCESS LOCK (FINAL – CLEAN)
+   ✅ ALGTP ACCESS LOCK (FINAL – CLEAN + NO ERROR)
+   - Hard boot lock (optional by env flag)
+   - HMAC token + exp (unix seconds)
+   - HttpOnly cookie save (?token=)
+   - Device bind (ua+ip hash)
+   - HTML locked page
+   - Debug endpoint (safe)
 ========================= */
 
-const crypto = require("crypto");
+/* ---------- flags ---------- */
+const LOCK_ENABLED =
+  String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
 
-const LOCK_ENABLED = true;
+// Hard boot lock: chỉ bật khi bạn muốn “chết luôn” nếu thiếu env
+const HARD_LOCK_ENABLED =
+  String(process.env.HARD_LOCK_ENABLED || "false").toLowerCase() === "true";
+
 const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
+const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
+
+/* ---------- optional hard boot lock ---------- */
+if (HARD_LOCK_ENABLED) {
+  const REQUIRED_ENVS = ["APP_ACCESS_SECRET", "MASSIVE_API_KEY"];
+  for (const k of REQUIRED_ENVS) {
+    if (!process.env[k] || !String(process.env[k]).trim()) {
+      console.error(`❌ FATAL: Missing required env ${k}`);
+      process.exit(1);
+    }
+  }
+}
+
+/* ---------- safe debug endpoint (không lộ secret) ---------- */
+app.get("/_debug/env", (req, res) => {
+  const allow =
+    String(process.env.DEBUG || "false").toLowerCase() === "true" ||
+    String(process.env.ALLOW_DEBUG || "false").toLowerCase() === "true";
+
+  if (!allow) return res.status(404).json({ ok: false });
+
+  res.json({
+    ok: true,
+    lockEnabled: LOCK_ENABLED,
+    hardLockEnabled: HARD_LOCK_ENABLED,
+    hasAppAccessSecret: Boolean(ACCESS_SECRET),
+    appAccessSecretLen: ACCESS_SECRET.length,
+    hasMassiveKey: Boolean(MASSIVE_API_KEY),
+    massiveKeyLen: MASSIVE_API_KEY.length,
+    nodeEnv: process.env.NODE_ENV || null,
+  });
+});
 
 /* ---------- base64url ---------- */
 function b64url(input) {
@@ -67,65 +97,7 @@ function b64urlJson(obj) {
 }
 function fromB64url(str) {
   const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
-  return Buffer.from(
-    (str + pad).replace(/-/g, "+").replace(/_/g, "/"),
-    "base64"
-  ).toString("utf8");
-}
-
-/* ---------- device fingerprint ---------- */
-function deviceHash(req) {
-  const ua = req.headers["user-agent"] || "";
-  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
-    .split(",")[0]
-    .trim();
-
-  return crypto
-    .createHash("sha256")
-    .update(ua + "|" + ip)
-    .digest("hex");
-}
-
-/* ---------- token sign ---------- */
-function sign(data) {
-  return b64url(
-    crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest()
-  );
-}
-function makeToken(payload) {
-  const body = b64urlJson(payload);
-  const sig = sign(body);
-  return `${body}.${sig}`;
-}
-
-/* ---------- verify ---------- */
-function verifyToken(token) {
-  try {
-    if (!token) return { ok: false, reason: "missing_token" };
-
-    const parts = String(token).split(".");
-    if (parts.length !== 2) return { ok: false, reason: "bad_format" };
-
-    const [body, sig] = parts;
-    const expected = sign(body);
-
-    const a = Buffer.from(sig);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return { ok: false, reason: "bad_signature" };
-    }
-
-    const payload = JSON.parse(fromB64url(body));
-    const now = Math.floor(Date.now() / 1000);
-
-    if (!payload.exp || now > payload.exp) {
-      return { ok: false, reason: "expired" };
-    }
-
-    return { ok: true, payload };
-  } catch {
-    return { ok: false, reason: "verify_error" };
-  }
+  return Buffer.from((str + pad).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 }
 
 /* ---------- cookie parse ---------- */
@@ -134,45 +106,108 @@ function parseCookie(req) {
   const out = {};
   raw.split(";").forEach((p) => {
     const i = p.indexOf("=");
-    if (i > -1) {
-      out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
-    }
+    if (i > -1) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
   });
   return out;
 }
 
-/* ---------- HTML LOCK ---------- */
-function renderLocked(reason = "unauthorized") {
-  return `<!doctype html>
-<html><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP Locked</title>
-<style>
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;
-border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-</style></head>
-<body><div class="box">
-<h2>🔒 ALGTP Scanner Locked</h2>
-<div class="mono">Reason: ${reason}</div>
-</div></body></html>`;
+/* ---------- device fingerprint ---------- */
+function deviceHash(req) {
+  const ua = String(req.headers["user-agent"] || "");
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+    .split(",")[0]
+    .trim();
+
+  return crypto.createHash("sha256").update(ua + "|" + ip).digest("hex");
 }
 
-/* ---------- save token ---------- */
+/* ---------- token sign/verify ---------- */
+function sign(data) {
+  // nếu secret trống -> sign ra vẫn có, nhưng verify sẽ fail (mình chặn sớm ở verify)
+  return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
+}
+
+function makeToken(payload) {
+  const body = b64urlJson(payload);
+  const sig = sign(body);
+  return `${body}.${sig}`;
+}
+
+function verifyToken(token) {
+  try {
+    if (!ACCESS_SECRET) return { ok: false, reason: "missing_secret" };
+    if (!token) return { ok: false, reason: "missing_token" };
+
+    const parts = String(token).split(".");
+    if (parts.length !== 2) return { ok: false, reason: "bad_format" };
+
+    const [body, sig] = parts;
+    const expected = sign(body);
+
+    const a = Buffer.from(String(sig));
+    const b = Buffer.from(String(expected));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return { ok: false, reason: "bad_signature" };
+    }
+
+    const payload = JSON.parse(fromB64url(body));
+    const exp = Number(payload?.exp);
+    if (!Number.isFinite(exp)) return { ok: false, reason: "no_exp" };
+
+    const now = Math.floor(Date.now() / 1000);
+    if (now > exp) return { ok: false, reason: "expired", exp, now };
+
+    return { ok: true, payload };
+  } catch (e) {
+    return { ok: false, reason: "verify_error", detail: String(e?.message || e) };
+  }
+}
+
+/* ---------- HTML LOCK PAGE ---------- */
+function renderLocked(reason = "unauthorized", extra = {}) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP™ Locked</title>
+  <style>
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;
+      border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    .muted{opacity:.8;line-height:1.6}
+    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2 style="margin:0 0 10px;">🔒 ALGTP™ Scanner Locked</h2>
+    <div class="muted">Access token missing / expired / invalid.</div>
+    <div class="mono" style="margin-top:10px;">Reason: ${String(reason)}${
+      extra?.exp ? `\nExp: ${extra.exp}` : ""
+    }${extra?.now ? `\nNow: ${extra.now}` : ""}</div>
+    <div class="muted" style="margin-top:12px;">Please purchase / renew access to continue.</div>
+  </div>
+</body>
+</html>`;
+}
+
+/* ---------- 1) save token from query -> cookie ---------- */
 app.use((req, res, next) => {
   if (!LOCK_ENABLED) return next();
-  const t = req.query.token || req.query.t;
+
+  const t = req.query.token || req.query.t || req.query.access_token;
   if (t) {
+    // NOTE: Secure chỉ hoạt động trên https (Render là https)
     res.setHeader(
       "Set-Cookie",
-      `algtp_token=${encodeURIComponent(t)}; Path=/; HttpOnly; SameSite=Lax; Secure`
+      `algtp_token=${encodeURIComponent(String(t))}; Path=/; HttpOnly; SameSite=Lax; Secure`
     );
   }
   next();
 });
 
-/* ---------- ACCESS GUARD ---------- */
+/* ---------- 2) access guard middleware ---------- */
 function accessGuard(req, res, next) {
   if (!LOCK_ENABLED) return next();
 
@@ -185,10 +220,12 @@ function accessGuard(req, res, next) {
 
   const v = verifyToken(token);
   if (!v.ok) {
-    return res.status(401).type("html").send(renderLocked(v.reason));
+    return res.status(401).type("html").send(renderLocked(v.reason, v));
   }
 
-  if (v.payload?.dh && v.payload.dh !== deviceHash(req)) {
+  // device bind
+  const currentDh = deviceHash(req);
+  if (v.payload?.dh && v.payload.dh !== currentDh) {
     return res.status(401).type("html").send(renderLocked("device_mismatch"));
   }
 
@@ -196,8 +233,16 @@ function accessGuard(req, res, next) {
   return next();
 }
 
-/* ---------- APPLY ---------- */
+/* ---------- 3) apply guard BEFORE routes ---------- */
 app.use(accessGuard);
+
+/* =========================
+   ✅ TỪ ĐÂY TRỞ XUỐNG: routes của bạn
+   app.get("/ui"...)
+   app.get("/list"...)
+   app.get("/scan"...)
+========================= */
+
 
 
 // ---------------- ENV ----------------

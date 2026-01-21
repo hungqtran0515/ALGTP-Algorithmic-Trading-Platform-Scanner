@@ -23,6 +23,8 @@
  *    GET /scan?symbols=NVDA,TSLA,AAPL
  */
 
+
+
 require("dotenv").config();
 
 const express = require("express");
@@ -33,25 +35,37 @@ const app = express();
 app.use(express.json());
 
 /* =========================
-   ✅ ALGTP ACCESS LOCK (FINAL – CLEAN + NO ERROR)
-   - Hard boot lock (optional by env flag)
-   - HMAC token + exp (unix seconds)
-   - HttpOnly cookie save (?token=)
-   - Device bind (ua+ip hash)
-   - HTML locked page
-   - Debug endpoint (safe)
+   ENV (DECLARE ONCE ONLY)
+========================= */
+const PORT = Number(process.env.PORT || 3000);
+
+const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
+const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
+const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
+
+const MASSIVE_MOVER_URL = String(
+  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
+).trim();
+
+const MASSIVE_TICKER_SNAPSHOT_URL = String(
+  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
+).trim();
+
+const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
+const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
+const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
+
+/* =========================
+   ✅ ALGTP ACCESS LOCK (FINAL – CLEAN + NO REDECLARE)
 ========================= */
 
 /* ---------- flags ---------- */
-const LOCK_ENABLED =
-  String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
+const LOCK_ENABLED = String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
 
-// Hard boot lock: chỉ bật khi bạn muốn “chết luôn” nếu thiếu env
-const HARD_LOCK_ENABLED =
-  String(process.env.HARD_LOCK_ENABLED || "false").toLowerCase() === "true";
+// Hard boot lock: bật khi muốn “chết luôn” nếu thiếu env
+const HARD_LOCK_ENABLED = String(process.env.HARD_LOCK_ENABLED || "false").toLowerCase() === "true";
 
 const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
-const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
 
 /* ---------- optional hard boot lock ---------- */
 if (HARD_LOCK_ENABLED) {
@@ -123,7 +137,6 @@ function deviceHash(req) {
 
 /* ---------- token sign/verify ---------- */
 function sign(data) {
-  // nếu secret trống -> sign ra vẫn có, nhưng verify sẽ fail (mình chặn sớm ở verify)
   return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
 }
 
@@ -198,7 +211,6 @@ app.use((req, res, next) => {
 
   const t = req.query.token || req.query.t || req.query.access_token;
   if (t) {
-    // NOTE: Secure chỉ hoạt động trên https (Render là https)
     res.setHeader(
       "Set-Cookie",
       `algtp_token=${encodeURIComponent(String(t))}; Path=/; HttpOnly; SameSite=Lax; Secure`
@@ -219,9 +231,7 @@ function accessGuard(req, res, next) {
     cookies.algtp_token;
 
   const v = verifyToken(token);
-  if (!v.ok) {
-    return res.status(401).type("html").send(renderLocked(v.reason, v));
-  }
+  if (!v.ok) return res.status(401).type("html").send(renderLocked(v.reason, v));
 
   // device bind
   const currentDh = deviceHash(req);
@@ -237,33 +247,8 @@ function accessGuard(req, res, next) {
 app.use(accessGuard);
 
 /* =========================
-   ✅ TỪ ĐÂY TRỞ XUỐNG: routes của bạn
-   app.get("/ui"...)
-   app.get("/list"...)
-   app.get("/scan"...)
+   ✅ ROUTES (YOUR ORIGINAL CODE)
 ========================= */
-
-
-
-// ---------------- ENV ----------------
-const PORT = Number(process.env.PORT || 3000);
-
-const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
-const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
-const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
-
-const MASSIVE_MOVER_URL = String(
-  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
-).trim();
-
-const MASSIVE_TICKER_SNAPSHOT_URL = String(
-  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
-).trim();
-
-const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
-const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
-const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
-
 
 // ---------------- helpers ----------------
 function envMissing() {
@@ -623,6 +608,13 @@ function capPass(row, cap) {
   if (!row.cap) return false;
   return row.cap === c;
 }
+
+// ---------------- UI ----------------
+// (UNCHANGED — your full renderUI + routes + API routes)
+// NOTE: Your renderUI + all routes remain exactly the same as you pasted.
+// I’m not re-pasting again here to keep message size reasonable.
+// IMPORTANT: Keep all your code from renderUI(...) down to app.listen(...) exactly as-is.
+
 
 // ---------------- UI ----------------
 function renderUI(preset = {}) {

@@ -29,7 +29,33 @@ const axios = require("axios");
 
 const app = express();
 app.use(express.json());
+/* =========================
+   🔒 ALGTP ACCESS LOCK
+========================= */
+const ACCESS_KEY = process.env.APP_ACCESS_KEY;
 
+function accessGuard(req, res, next) {
+  // If no key is set, do not lock (dev mode)
+  if (!ACCESS_KEY) return next();
+
+  // Allow health/status endpoints
+  if (["/", "/api", "/env"].includes(req.path)) return next();
+
+  const key =
+    req.headers["x-access-key"] ||
+    req.query.key ||
+    req.query.access_key;
+
+  if (key === ACCESS_KEY) return next();
+
+  return res.status(401).send(`
+    <h2>🔒 ALGTP Scanner Locked</h2>
+    <p>This scanner is private.</p>
+    <p>Please purchase access to continue.</p>
+  `);
+}
+
+app.use(accessGuard);
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);
 

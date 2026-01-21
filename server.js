@@ -451,7 +451,107 @@ function accessGuard(req, res, next) {
 
 /* ---------- 3) apply guard BEFORE routes ---------- */
 app.use(accessGuard);
+/* =========================
+   🔒 ALGTP ACCESS LOCK (CLEAN – ONE TIME ONLY)
+========================= */
 
+const LOCK_ENABLED = String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
+const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
+
+// bypass routes
+const LOCK_BYPASS_PATHS = new Set(["/health", "/api"]);
+
+// anti-share (1 token = 1 IP / 30m)
+const TOKEN_IP_WINDOW_SEC = 1800;
+const tokenIpStore = new Map();
+
+/* ---------- helpers ---------- */
+function b64url(input){
+  return Buffer.from(input).toString("base64").replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+}
+function b64urlJson(obj){ return b64url(JSON.stringify(obj)); }
+function fromB64url(str){
+  const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
+  return Buffer.from((str+pad).replace(/-/g,"+").replace(/_/g,"/"),"base64").toString("utf8");
+}
+function parseCookie(req){
+  const raw = req.headers.cookie || "";
+  const out = {};
+  raw.split(";").forEach(p=>{
+    const i=p.indexOf("=");
+    if(i>-1) out[p.slice(0,i).trim()] = decodeURIComponent(p.slice(i+1).trim());
+  });
+  return out;
+}
+function getIp(req){
+  return String(req.headers["x-forwarded-for"]||req.socket.remoteAddress||"").split(",")[0].trim();
+}
+function deviceHash(req){
+  const ua = String(req.headers["user-agent"]||"");
+  return crypto.createHash("sha256").update(ua+"|"+getIp(req)).digest("hex");
+}
+function sign(data){
+  return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
+}
+function makeToken(payload){
+  const body=b64urlJson(payload);
+  return body+"."+sign(body);
+}
+function verifyToken(token){
+  try{
+    if(!ACCESS_SECRET) return {ok:false,reason:"missing_secret"};
+    if(!token) return {ok:false,reason:"missing_token"};
+    const [body,sig]=String(token).split(".");
+    if(!body||!sig) return {ok:false,reason:"bad_format"};
+    if(sign(body)!==sig) return {ok:false,reason:"bad_signature"};
+    const payload=JSON.parse(fromB64url(body));
+    if(!payload.exp||Date.now()/1000>payload.exp) return {ok:false,reason:"expired"};
+    return {ok:true,payload};
+  }catch{ return {ok:false,reason:"verify_error"};}
+}
+function renderLocked(reason){
+  return `<html><body style="background:#0b0d12;color:#e6e8ef;font-family:system-ui">
+  <div style="max-width:600px;margin:10vh auto;padding:18px;border:1px solid #333;border-radius:12px">
+  <h2>🔒 ALGTP Locked</h2><pre>${reason}</pre></div></body></html>`;
+}
+
+/* ---------- save token ---------- */
+app.use((req,res,next)=>{
+  if(!LOCK_ENABLED) return next();
+  const t=req.query.token||req.query.t;
+  if(t) res.setHeader("Set-Cookie",`algtp_token=${encodeURIComponent(t)};Path=/;HttpOnly;SameSite=Lax;Secure`);
+  next();
+});
+
+/* ---------- guard ---------- */
+function accessGuard(req,res,next){
+  if(!LOCK_ENABLED) return next();
+  if(LOCK_BYPASS_PATHS.has(req.path)) return next();
+
+  const cookies=parseCookie(req);
+  const token=req.headers["x-access-token"]||req.query.token||cookies.algtp_token;
+
+  const v=verifyToken(token);
+  if(!v.ok) return res.status(401).send(renderLocked(v.reason));
+
+  if(v.payload.dh && v.payload.dh!==deviceHash(req))
+    return res.status(401).send(renderLocked("device_mismatch"));
+
+  const ip=getIp(req);
+  const rec=tokenIpStore.get(token);
+  const now=Date.now();
+  if(!rec) tokenIpStore.set(token,{ip,exp:now+TOKEN_IP_WINDOW_SEC*1000});
+  else if(rec.ip!==ip) return res.status(401).send(renderLocked("ip_mismatch"));
+  else rec.exp=now+TOKEN_IP_WINDOW_SEC*1000;
+
+  req.algtpAccess=v.payload;
+  next();
+}
+
+app.use(accessGuard);
+
+/* ---------- health ---------- */
+app.get("/health",(req,res)=>res.json({ok:true}));
 /* =========================
    ✅ ROUTES (YOUR ORIGINAL CODE)
 ========================= */

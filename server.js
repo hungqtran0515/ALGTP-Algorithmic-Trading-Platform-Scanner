@@ -30,67 +30,146 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 /* =========================
-   🔒 ALGTP ACCESS LOCK (COOKIE + ?key=)
+   🔒 ALGTP ACCESS LOCK (EXPIRING TOKEN)
+   - token signed with HMAC
+   - token contains exp (unix seconds)
+   - stored in cookie after first visit
 ========================= */
-const ACCESS_KEY = String(process.env.APP_ACCESS_KEY || "").trim();
+const crypto = require("crypto");
 
-// helper: get cookie by name
-function getCookie(req, name) {
-  const raw = req.headers.cookie || "";
-  const parts = raw.split(";").map((s) => s.trim());
-  const found = parts.find((p) => p.startsWith(name + "="));
-  if (!found) return null;
-  return decodeURIComponent(found.slice(name.length + 1));
+const LOCK_ENABLED = String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
+const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
+
+function b64url(input) {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+function b64urlJson(obj) {
+  return b64url(JSON.stringify(obj));
+}
+function fromB64url(str) {
+  const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
+  const base64 = (str + pad).replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(base64, "base64").toString("utf8");
+}
+function sign(data) {
+  return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
+}
+function makeToken(payloadObj) {
+  const payload = b64urlJson(payloadObj);
+  const sig = sign(payload);
+  return `${payload}.${sig}`;
+}
+function verifyToken(token) {
+  try {
+    if (!token || !ACCESS_SECRET) return { ok: false, reason: "missing_token_or_secret" };
+    const parts = String(token).split(".");
+    if (parts.length !== 2) return { ok: false, reason: "bad_format" };
+
+    const [payload, sig] = parts;
+    const expected = sign(payload);
+
+    // timing-safe compare
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: "bad_signature" };
+
+    const json = JSON.parse(fromB64url(payload));
+    const exp = Number(json?.exp);
+    if (!Number.isFinite(exp)) return { ok: false, reason: "no_exp" };
+
+    const now = Math.floor(Date.now() / 1000);
+    if (now > exp) return { ok: false, reason: "expired", exp, now };
+
+    return { ok: true, payload: json };
+  } catch (e) {
+    return { ok: false, reason: "verify_error", detail: String(e?.message || e) };
+  }
 }
 
-// 1) If user visits /ui?key=XXXX then save key into cookie
+function parseCookie(req) {
+  const raw = req.headers.cookie || "";
+  const out = {};
+  raw.split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > -1) {
+      const k = p.slice(0, i).trim();
+      const v = p.slice(i + 1).trim();
+      out[k] = decodeURIComponent(v);
+    }
+  });
+  return out;
+}
+
+// 1) If user visits with ?token=... then save token to cookie
 app.use((req, res, next) => {
-  if (!ACCESS_KEY) return next(); // no lock in dev
+  if (!LOCK_ENABLED) return next();
+  if (!ACCESS_SECRET) return next(); // dev mode if secret missing
 
-  const k = String(req.query.key || req.query.access_key || "").trim();
-  if (k) {
-    const isHttps =
-      req.headers["x-forwarded-proto"] === "https" || req.secure === true;
-
-    const attrs = [
-      `algtp_key=${encodeURIComponent(k)}`,
-      "Path=/",
-      "SameSite=Lax",
-      "HttpOnly",
-      isHttps ? "Secure" : null,
-    ].filter(Boolean);
-
-    res.setHeader("Set-Cookie", attrs.join("; "));
+  const token = req.query.token || req.query.t || req.query.access_token;
+  if (token) {
+    // Set cookie for whole site
+    // NOTE: Secure works on https (Render is https)
+    res.setHeader(
+      "Set-Cookie",
+      `algtp_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Secure`
+    );
   }
   next();
 });
 
-// 2) Guard: allow UI page load, but lock API/data unless key matches
+// 2) Guard
 function accessGuard(req, res, next) {
-  // If no key is set, do not lock (dev mode)
-  if (!ACCESS_KEY) return next();
+  if (!LOCK_ENABLED) return next();
+  if (!ACCESS_SECRET) return next(); // dev mode
 
-  // Allow health/status endpoints + UI pages to load
+  // Allow health/status endpoints
   if (["/", "/api", "/env"].includes(req.path)) return next();
-  if (req.path.startsWith("/ui")) return next(); // UI HTML can load
 
-  // Read key from: header -> query -> cookie
-  const key =
-    String(req.headers["x-access-key"] || "").trim() ||
-    String(req.query.key || req.query.access_key || "").trim() ||
-    String(getCookie(req, "algtp_key") || "").trim();
+  const cookies = parseCookie(req);
 
-  if (key && key === ACCESS_KEY) return next();
+  // Accept token from:
+  // - header: x-access-token
+  // - query: token
+  // - cookie: algtp_token
+  const token =
+    req.headers["x-access-token"] ||
+    req.query.token ||
+    req.query.t ||
+    cookies.algtp_token;
+
+  const v = verifyToken(token);
+  if (v.ok) {
+    // Optionally attach user info
+    req.algtpAccess = v.payload;
+    return next();
+  }
 
   return res.status(401).send(`
-    <h2>🔒 ALGTP Scanner Locked</h2>
-    <p>This scanner is private.</p>
-    <p>Please purchase access to continue.</p>
-    <p><b>Tip:</b> Open <code>/ui?key=YOUR_KEY</code></p>
+    <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body style="font-family:system-ui;-webkit-font-smoothing:antialiased;background:#0b0d12;color:#e6e8ef;padding:18px;">
+      <div style="max-width:720px;margin:0 auto;border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:16px;background:rgba(18,24,43,.55);">
+        <h2 style="margin:0 0 8px;">🔒 ALGTP Scanner Locked</h2>
+        <p style="opacity:.85;line-height:1.6;margin:0 0 10px;">
+          Access token is missing or expired.
+        </p>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75;white-space:pre-wrap;">
+Reason: ${String(v.reason || "unknown")}
+${v.exp ? `Exp: ${v.exp}` : ""}
+        </div>
+        <p style="margin-top:12px;opacity:.85;">
+          Please purchase / renew access to continue.
+        </p>
+      </div>
+    </body></html>
   `);
 }
 
 app.use(accessGuard);
+
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);

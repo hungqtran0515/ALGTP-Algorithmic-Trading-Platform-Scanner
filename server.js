@@ -35,6 +35,212 @@ const app = express();
 app.use(express.json());
 
 /* =========================
+   🔒 ALGTP ACCESS LOCK + PLAN + BYPASS (DROP-IN PATCH)
+   - HMAC token + exp
+   - HttpOnly cookie (?token=)
+   - Device bind (ua+ip hash)
+   - Plan-based feature lock (free/pro)
+   - /health + /api bypass lock
+   - Anti-share (1 token = 1 IP rolling window) [in-memory]
+========================= */
+
+const LOCK_ENABLED = String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
+const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
+
+// plan rules
+const PLAN_FREE = "free";
+const PLAN_PRO = "pro";
+
+// bypass routes (no token needed)
+const LOCK_BYPASS_PATHS = new Set(["/health", "/api"]);
+
+// Anti-share rolling window (seconds)
+const TOKEN_IP_WINDOW_SEC = Math.max(60, Number(process.env.TOKEN_IP_WINDOW_SEC || 1800)); // default 30m
+
+// ⚠️ In-memory store (OK for single instance; for multi instance cần Redis)
+const tokenIpStore = new Map(); // token -> { ip, expMs }
+
+function nowSec() { return Math.floor(Date.now() / 1000); }
+
+function b64url(input) {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+function b64urlJson(obj) { return b64url(JSON.stringify(obj)); }
+function fromB64url(str) {
+  const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
+  return Buffer.from((str + pad).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function parseCookie(req) {
+  const raw = req.headers.cookie || "";
+  const out = {};
+  raw.split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > -1) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
+  });
+  return out;
+}
+
+function getClientIp(req) {
+  return String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+    .split(",")[0]
+    .trim();
+}
+
+function deviceHash(req) {
+  const ua = String(req.headers["user-agent"] || "");
+  const ip = getClientIp(req);
+  return crypto.createHash("sha256").update(ua + "|" + ip).digest("hex");
+}
+
+function sign(data) {
+  return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
+}
+
+function makeToken(payload) {
+  const body = b64urlJson(payload);
+  const sig = sign(body);
+  return `${body}.${sig}`;
+}
+
+function verifyToken(token) {
+  try {
+    if (!ACCESS_SECRET) return { ok: false, reason: "missing_secret" };
+    if (!token) return { ok: false, reason: "missing_token" };
+
+    const parts = String(token).split(".");
+    if (parts.length !== 2) return { ok: false, reason: "bad_format" };
+
+    const [body, sig] = parts;
+    const expected = sign(body);
+
+    const a = Buffer.from(String(sig));
+    const b = Buffer.from(String(expected));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return { ok: false, reason: "bad_signature" };
+    }
+
+    const payload = JSON.parse(fromB64url(body));
+    const exp = Number(payload?.exp);
+    if (!Number.isFinite(exp)) return { ok: false, reason: "no_exp" };
+
+    const now = nowSec();
+    if (now > exp) return { ok: false, reason: "expired", exp, now };
+
+    return { ok: true, payload };
+  } catch (e) {
+    return { ok: false, reason: "verify_error", detail: String(e?.message || e) };
+  }
+}
+
+function renderLocked(reason = "unauthorized") {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP™ Locked</title>
+<style>
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+.muted{opacity:.85;line-height:1.6}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="box">
+  <h2 style="margin:0 0 10px;">🔒 ALGTP™ Scanner Locked</h2>
+  <div class="muted">Access token missing / expired / invalid.</div>
+  <div class="mono" style="margin-top:10px;">Reason: ${String(reason)}</div>
+  <div class="muted" style="margin-top:12px;">Please purchase / renew access to continue.</div>
+</div>
+</body>
+</html>`;
+}
+
+// 1) Save token from query -> cookie (visit with ?token=xxx)
+app.use((req, res, next) => {
+  if (!LOCK_ENABLED) return next();
+  const t = req.query.token || req.query.t || req.query.access_token;
+  if (t) {
+    res.setHeader(
+      "Set-Cookie",
+      `algtp_token=${encodeURIComponent(String(t))}; Path=/; HttpOnly; SameSite=Lax; Secure`
+    );
+  }
+  next();
+});
+
+// Anti-share: 1 token = 1 IP within rolling window
+function tokenIpCheck(token, req) {
+  const ip = getClientIp(req);
+  const nowMs = Date.now();
+
+  // cleanup expired (light)
+  const rec = tokenIpStore.get(token);
+  if (rec && rec.expMs <= nowMs) tokenIpStore.delete(token);
+
+  const cur = tokenIpStore.get(token);
+  if (!cur) {
+    tokenIpStore.set(token, { ip, expMs: nowMs + TOKEN_IP_WINDOW_SEC * 1000 });
+    return { ok: true };
+  }
+  if (cur.ip !== ip) return { ok: false, reason: "ip_mismatch" };
+
+  // refresh rolling window
+  cur.expMs = nowMs + TOKEN_IP_WINDOW_SEC * 1000;
+  tokenIpStore.set(token, cur);
+  return { ok: true };
+}
+
+// plan helper
+function getPlan(payload) {
+  return String(payload?.plan || PLAN_FREE).toLowerCase(); // default free
+}
+function requirePlan(req, res, next, requiredPlan) {
+  const plan = getPlan(req.algtpAccess || {});
+  if (requiredPlan === PLAN_FREE) return next();
+  if (requiredPlan === PLAN_PRO && plan === PLAN_PRO) return next();
+  return res.status(403).type("html").send(renderLocked("plan_required_" + requiredPlan));
+}
+
+// 2) Guard (bypass /health /api)
+function accessGuard(req, res, next) {
+  if (!LOCK_ENABLED) return next();
+  if (LOCK_BYPASS_PATHS.has(req.path)) return next();
+
+  const cookies = parseCookie(req);
+  const token = req.headers["x-access-token"] || req.query.token || req.query.t || cookies.algtp_token;
+
+  const v = verifyToken(token);
+  if (!v.ok) return res.status(401).type("html").send(renderLocked(v.reason));
+
+  // device bind check
+  const dh = deviceHash(req);
+  if (v.payload?.dh && v.payload.dh !== dh) {
+    return res.status(401).type("html").send(renderLocked("device_mismatch"));
+  }
+
+  // anti-share IP rolling window
+  const ipCheck = tokenIpCheck(String(token), req);
+  if (!ipCheck.ok) {
+    return res.status(401).type("html").send(renderLocked(ipCheck.reason));
+  }
+
+  req.algtpAccess = v.payload;
+  return next();
+}
+
+// ✅ APPLY GUARD ONCE ONLY
+app.use(accessGuard);
+
+// ✅ Health route (bypass)
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+/* =========================
    ENV (DECLARE ONCE ONLY)
 ========================= */
 const PORT = Number(process.env.PORT || 3000);

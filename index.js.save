@@ -1,0 +1,104 @@
+require("dotenv").config();
+
+const express = require("express");
+const app = express();
+const path = require("path");
+app.use(express.static(path.join(__dirname, "public")));
+
+const PORT = process.env.PORT || 3000;
+
+// ✅ serve UI from /public
+app.use(express.static("public"));
+
+// ✅ root test
+app.get("/api", (req, res) => {
+  res.json({ ok: true, message: "ALGTP-AI API Server running 🚀" });
+});
+
+// ✅ /scan DEMO (no polygon yet) -> để bạn nhìn UI chạy trước
+app.get("/scan", (req, res) => {
+  const raw = String(req.query.symbols || "NVDA,TSLA,AAPL");
+  const symbols = raw.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+
+  const results = symbols.map(sym => {
+    // demo numbers
+    const price = sym === "NVDA" ? 620.15 : 100 + Math.random() * 50;
+
+    const gapPct = -2 + Math.random() * 8;
+    const rvol = 0.8 + Math.random() * 6;
+    const volFloat = 0.3 + Math.random() * 6;
+    const rsi = 35 + Math.random() * 50;
+    const ao = rsi >= 50 ? "GREEN" : "RED";
+
+    // Demand Score 0–5 (demo)
+    let demand = 0;
+    if (gapPct >= 5) demand++;
+    if (rvol >= 2) demand++;
+    if (volFloat >= 1.5) demand++;
+    if (rsi >= 50) demand++;
+    if (ao === "GREEN") demand++;
+
+    const signal = (demand >= 3 && gapPct >= 3) ? "BUY" : (demand >= 2 ? "WATCH" : "WAIT");
+
+    return {
+      symbol: sym,
+      price: Number(price.toFixed(2)),
+      gapPct: Number(gapPct.toFixed(2)),
+      rvol: Number(rvol.toFixed(2)),
+      volFloat: Number(volFloat.toFixed(2)),
+      rsi: Math.round(rsi),
+      ao,
+      demand,
+      signal
+    };
+  });
+
+  res.json({ results });
+});
+app.get("/active", async (req, res) => {
+  try {
+    const raw = String(req.query.symbols || "NVDA,TSLA,AAPL,AMD,CGTL");
+    const symbols = raw.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+
+    // ✅ Gọi lại /scan để lấy data (nhanh nhất)
+    const baseUrl = `http://localhost:${PORT}`;
+    const r = await axios.get(`${baseUrl}/scan?symbols=${encodeURIComponent(symbols.join(","))}`);
+    const results = r.data?.results || [];
+
+    const calc = (x) => {
+      const gap = Number(x.gapPct || 0);
+      const rvol = Number(x.rvol || 0);
+      const volFloat = Number(x.volFloat || 0);
+      const demand = Number(x.demand || 0);
+      return Number(((Math.abs(gap)*2) + (rvol*3) + (volFloat*2) + (demand*2)).toFixed(2));
+    };
+
+    const top = results
+      .map(x => ({ ...x, activeScore: calc(x) }))
+      .sort((a,b) => b.activeScore - a.activeScore)
+      .slice(0, 10);
+
+    res.json({ mode: "ACTIVE_TOP10", count: results.length, top });
+  } catch (err) {
+    res.status(400).json({
+      error: "Active ranking failed",
+      detail: String(err?.message || err),
+      hint: "Check /scan works first, then retry /active",
+    });
+  }
+});
+
+
+app.listen(PORT, () => {
+  console.log(`🚀 ALGTP-AI running on http://localhost:${PORT}`);
+  console.log(`✅ UI: http://localhost:${PORT}/`);
+  console.log(`✅ TEST: http://localhost:${PORT}/api`);
+  console.log(`✅ SCAN: http://localhost:${PORT}/scan?symbols=NVDA,TSLA,AAPL`);
+});
+
+
+
+
+
+
+

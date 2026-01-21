@@ -30,32 +30,68 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 /* =========================
-   🔒 ALGTP ACCESS LOCK
+   🔒 ALGTP ACCESS LOCK (COOKIE + ?key=)
 ========================= */
-const ACCESS_KEY = process.env.APP_ACCESS_KEY;
+const ACCESS_KEY = String(process.env.APP_ACCESS_KEY || "").trim();
 
+// helper: get cookie by name
+function getCookie(req, name) {
+  const raw = req.headers.cookie || "";
+  const parts = raw.split(";").map((s) => s.trim());
+  const found = parts.find((p) => p.startsWith(name + "="));
+  if (!found) return null;
+  return decodeURIComponent(found.slice(name.length + 1));
+}
+
+// 1) If user visits /ui?key=XXXX then save key into cookie
+app.use((req, res, next) => {
+  if (!ACCESS_KEY) return next(); // no lock in dev
+
+  const k = String(req.query.key || req.query.access_key || "").trim();
+  if (k) {
+    const isHttps =
+      req.headers["x-forwarded-proto"] === "https" || req.secure === true;
+
+    const attrs = [
+      `algtp_key=${encodeURIComponent(k)}`,
+      "Path=/",
+      "SameSite=Lax",
+      "HttpOnly",
+      isHttps ? "Secure" : null,
+    ].filter(Boolean);
+
+    res.setHeader("Set-Cookie", attrs.join("; "));
+  }
+  next();
+});
+
+// 2) Guard: allow UI page load, but lock API/data unless key matches
 function accessGuard(req, res, next) {
   // If no key is set, do not lock (dev mode)
   if (!ACCESS_KEY) return next();
 
-  // Allow health/status endpoints
+  // Allow health/status endpoints + UI pages to load
   if (["/", "/api", "/env"].includes(req.path)) return next();
+  if (req.path.startsWith("/ui")) return next(); // UI HTML can load
 
+  // Read key from: header -> query -> cookie
   const key =
-    req.headers["x-access-key"] ||
-    req.query.key ||
-    req.query.access_key;
+    String(req.headers["x-access-key"] || "").trim() ||
+    String(req.query.key || req.query.access_key || "").trim() ||
+    String(getCookie(req, "algtp_key") || "").trim();
 
-  if (key === ACCESS_KEY) return next();
+  if (key && key === ACCESS_KEY) return next();
 
   return res.status(401).send(`
     <h2>🔒 ALGTP Scanner Locked</h2>
     <p>This scanner is private.</p>
     <p>Please purchase access to continue.</p>
+    <p><b>Tip:</b> Open <code>/ui?key=YOUR_KEY</code></p>
   `);
 }
 
 app.use(accessGuard);
+
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);
 

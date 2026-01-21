@@ -29,6 +29,29 @@ const axios = require("axios");
 
 const app = express();
 app.use(express.json());
+const app = express();
+app.use(express.json());
+
+/* 🔒 COOKIE SAVE */
+app.use((req, res, next) => {
+  const t = req.query.token;
+  if (t) {
+    res.setHeader(
+      "Set-Cookie",
+      `algtp_token=${encodeURIComponent(t)}; Path=/; HttpOnly; SameSite=Lax`
+    );
+  }
+  next();
+});
+
+/* 🔒 ACCESS GUARD */
+app.use(accessGuard);
+
+/* ❗ SAU ĐÓ MỚI TỚI ROUTES */
+app.get("/ui", ...)
+app.get("/list", ...)
+app.get("/scan", ...)
+
 /* =========================
    🔒 ALGTP ACCESS LOCK (EXPIRING TOKEN)
    - token signed with HMAC

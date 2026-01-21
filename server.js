@@ -24,6 +24,18 @@
  */
 
 require("dotenv").config();
+// ================= HARD BOOT LOCK =================
+const REQUIRED_ENVS = [
+  "APP_ACCESS_SECRET",
+  "MASSIVE_API_KEY"
+];
+
+for (const k of REQUIRED_ENVS) {
+  if (!process.env[k] || !String(process.env[k]).trim()) {
+    console.error(`❌ FATAL: Missing required env ${k}`);
+    process.exit(1); // HARD STOP
+  }
+}
 const express = require("express");
 const axios = require("axios");
 
@@ -31,37 +43,18 @@ const app = express();
 app.use(express.json());
 
 
-/* 🔒 COOKIE SAVE */
-app.use((req, res, next) => {
-  const t = req.query.token;
-  if (t) {
-    res.setHeader(
-      "Set-Cookie",
-      `algtp_token=${encodeURIComponent(t)}; Path=/; HttpOnly; SameSite=Lax`
-    );
-  }
-  next();
-});
 
-/* 🔒 ACCESS GUARD */
-app.use(accessGuard);
-
-/* ❗ SAU ĐÓ MỚI TỚI ROUTES */
-app.get("/ui", ...)
-app.get("/list", ...)
-app.get("/scan", ...)
 
 /* =========================
-   🔒 ALGTP ACCESS LOCK (EXPIRING TOKEN)
-   - token signed with HMAC
-   - token contains exp (unix seconds)
-   - stored in cookie after first visit
+   🔒 ALGTP ACCESS LOCK (FINAL – CLEAN)
 ========================= */
+
 const crypto = require("crypto");
 
-const LOCK_ENABLED = String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
+const LOCK_ENABLED = true;
 const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
 
+/* ---------- base64url ---------- */
 function b64url(input) {
   return Buffer.from(input)
     .toString("base64")
@@ -74,89 +67,116 @@ function b64urlJson(obj) {
 }
 function fromB64url(str) {
   const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
-  const base64 = (str + pad).replace(/-/g, "+").replace(/_/g, "/");
-  return Buffer.from(base64, "base64").toString("utf8");
+  return Buffer.from(
+    (str + pad).replace(/-/g, "+").replace(/_/g, "/"),
+    "base64"
+  ).toString("utf8");
 }
+
+/* ---------- device fingerprint ---------- */
+function deviceHash(req) {
+  const ua = req.headers["user-agent"] || "";
+  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+    .split(",")[0]
+    .trim();
+
+  return crypto
+    .createHash("sha256")
+    .update(ua + "|" + ip)
+    .digest("hex");
+}
+
+/* ---------- token sign ---------- */
 function sign(data) {
-  return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
+  return b64url(
+    crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest()
+  );
 }
-function makeToken(payloadObj) {
-  const payload = b64urlJson(payloadObj);
-  const sig = sign(payload);
-  return `${payload}.${sig}`;
+function makeToken(payload) {
+  const body = b64urlJson(payload);
+  const sig = sign(body);
+  return `${body}.${sig}`;
 }
+
+/* ---------- verify ---------- */
 function verifyToken(token) {
   try {
-    if (!token || !ACCESS_SECRET) return { ok: false, reason: "missing_token_or_secret" };
+    if (!token) return { ok: false, reason: "missing_token" };
+
     const parts = String(token).split(".");
     if (parts.length !== 2) return { ok: false, reason: "bad_format" };
 
-    const [payload, sig] = parts;
-    const expected = sign(payload);
+    const [body, sig] = parts;
+    const expected = sign(body);
 
-    // timing-safe compare
     const a = Buffer.from(sig);
     const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: "bad_signature" };
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return { ok: false, reason: "bad_signature" };
+    }
 
-    const json = JSON.parse(fromB64url(payload));
-    const exp = Number(json?.exp);
-    if (!Number.isFinite(exp)) return { ok: false, reason: "no_exp" };
-
+    const payload = JSON.parse(fromB64url(body));
     const now = Math.floor(Date.now() / 1000);
-    if (now > exp) return { ok: false, reason: "expired", exp, now };
 
-    return { ok: true, payload: json };
-  } catch (e) {
-    return { ok: false, reason: "verify_error", detail: String(e?.message || e) };
+    if (!payload.exp || now > payload.exp) {
+      return { ok: false, reason: "expired" };
+    }
+
+    return { ok: true, payload };
+  } catch {
+    return { ok: false, reason: "verify_error" };
   }
 }
 
+/* ---------- cookie parse ---------- */
 function parseCookie(req) {
   const raw = req.headers.cookie || "";
   const out = {};
   raw.split(";").forEach((p) => {
     const i = p.indexOf("=");
     if (i > -1) {
-      const k = p.slice(0, i).trim();
-      const v = p.slice(i + 1).trim();
-      out[k] = decodeURIComponent(v);
+      out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
     }
   });
   return out;
 }
 
-// 1) If user visits with ?token=... then save token to cookie
+/* ---------- HTML LOCK ---------- */
+function renderLocked(reason = "unauthorized") {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP Locked</title>
+<style>
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;
+border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+</style></head>
+<body><div class="box">
+<h2>🔒 ALGTP Scanner Locked</h2>
+<div class="mono">Reason: ${reason}</div>
+</div></body></html>`;
+}
+
+/* ---------- save token ---------- */
 app.use((req, res, next) => {
   if (!LOCK_ENABLED) return next();
-  if (!ACCESS_SECRET) return next(); // dev mode if secret missing
-
-  const token = req.query.token || req.query.t || req.query.access_token;
-  if (token) {
-    // Set cookie for whole site
-    // NOTE: Secure works on https (Render is https)
+  const t = req.query.token || req.query.t;
+  if (t) {
     res.setHeader(
       "Set-Cookie",
-      `algtp_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Secure`
+      `algtp_token=${encodeURIComponent(t)}; Path=/; HttpOnly; SameSite=Lax; Secure`
     );
   }
   next();
 });
 
-// 2) Guard
+/* ---------- ACCESS GUARD ---------- */
 function accessGuard(req, res, next) {
   if (!LOCK_ENABLED) return next();
-  if (!ACCESS_SECRET) return next(); // dev mode
-
-  // Allow health/status endpoints
-  if (["/", "/api", "/env"].includes(req.path)) return next();
 
   const cookies = parseCookie(req);
-
-  // Accept token from:
-  // - header: x-access-token
-  // - query: token
-  // - cookie: algtp_token
   const token =
     req.headers["x-access-token"] ||
     req.query.token ||
@@ -164,32 +184,19 @@ function accessGuard(req, res, next) {
     cookies.algtp_token;
 
   const v = verifyToken(token);
-  if (v.ok) {
-    // Optionally attach user info
-    req.algtpAccess = v.payload;
-    return next();
+  if (!v.ok) {
+    return res.status(401).type("html").send(renderLocked(v.reason));
   }
 
-  return res.status(401).send(`
-    <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-    <body style="font-family:system-ui;-webkit-font-smoothing:antialiased;background:#0b0d12;color:#e6e8ef;padding:18px;">
-      <div style="max-width:720px;margin:0 auto;border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:16px;background:rgba(18,24,43,.55);">
-        <h2 style="margin:0 0 8px;">🔒 ALGTP Scanner Locked</h2>
-        <p style="opacity:.85;line-height:1.6;margin:0 0 10px;">
-          Access token is missing or expired.
-        </p>
-        <div style="font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75;white-space:pre-wrap;">
-Reason: ${String(v.reason || "unknown")}
-${v.exp ? `Exp: ${v.exp}` : ""}
-        </div>
-        <p style="margin-top:12px;opacity:.85;">
-          Please purchase / renew access to continue.
-        </p>
-      </div>
-    </body></html>
-  `);
+  if (v.payload?.dh && v.payload.dh !== deviceHash(req)) {
+    return res.status(401).type("html").send(renderLocked("device_mismatch"));
+  }
+
+  req.algtpAccess = v.payload;
+  return next();
 }
 
+/* ---------- APPLY ---------- */
 app.use(accessGuard);
 
 

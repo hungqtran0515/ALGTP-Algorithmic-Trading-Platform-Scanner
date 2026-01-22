@@ -1,822 +1,1074 @@
 /**
- * server.js — ALGTP™ – Algorithmic Trading Platform Scanner (FULL + Multi-Page UI + Alerts + Auto Refresh + Scan Symbols)
+ * server.js — ALGTP™ SaaS Scanner (OTP + PIN + Plans + Device Limits + Trial Expiry Hard Block)
+ * ---------------------------------------------------------------------------
+ * ✅ 1-box UX: enter PHONE (OTP) or 8-char PIN code
+ * ✅ Register requires: phone + email
+ * ✅ Auth methods:
+ *    - Phone OTP (request + verify)
+ *    - PIN unlock (8 chars) after user sets PIN
+ *    - Owner master code (8 chars) for admin
+ * ✅ Plans: trial/pro/vip with plan_expires_at
+ *    - Trial = 14 days
+ *    - Expired => HARD BLOCK UI (/app*) -> /billing
+ *    - Expired => API returns 402 PLAN_EXPIRED
+ * ✅ Soft device limit (Option C):
+ *    - trial: 1 device
+ *    - pro:   2 devices
+ *    - vip:   3 devices
+ *    - exceed limit => kick oldest sessions
+ * ✅ Cookie stores ONLY session_id (httpOnly)
+ *
+ * Dependencies:
+ *   npm i express dotenv better-sqlite3 cookie-parser bcryptjs nodemailer
+ * Optional SMS provider: Twilio (recommended) -> npm i twilio
+ *
+ * ENV (.env):
+ *   NODE_ENV=development
+ *   PORT=3000
+ *   SESSION_SECRET=replace_with_long_random
+ *   DB_PATH=./algtp.db
+ *   OWNER_CODE=AB12CD34            # 8 chars
+ *   TRIAL_DAYS=14
+ *
+ *   SMTP_HOST=smtp.gmail.com
+ *   SMTP_PORT=587
+ *   SMTP_USER=you@gmail.com
+ *   SMTP_PASS=app_password
+ *   EMAIL_FROM="ALGTP <you@gmail.com>"
+ *
+ *   TWILIO_ACCOUNT_SID=...
+ *   TWILIO_AUTH_TOKEN=...
+ *   TWILIO_FROM=+1xxxxxxxxxx
  */
 
 require("dotenv").config();
 
-const express = require("express");
-const axios = require("axios");
 const crypto = require("crypto");
+const express = require("express");
+const cookieParser = require("cookie-parser");
+const bcrypt = require("bcryptjs");
+const Database = require("better-sqlite3");
+const nodemailer = require("nodemailer");
 
+// Optional Twilio
+let twilioClient = null;
+try {
+  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+    // eslint-disable-next-line global-require
+    const twilio = require("twilio");
+    twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  }
+} catch {
+  twilioClient = null;
+}
+
+// -----------------------------------------------------------------------------
+// App basics
+// -----------------------------------------------------------------------------
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // QUAN TRỌNG cho PIN form
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
-// ============================================================================
-// ✅ HELPERS (shared)
-// ============================================================================
+const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
-function n(x) {
-  const v = Number(x);
-  return Number.isFinite(v) ? v : null;
-}
-function round2(x) {
-  const v = n(x);
-  return v === null ? null : Number(v.toFixed(2));
-}
-function clamp(x, a, b) {
-  return Math.max(a, Math.min(b, x));
-}
+const SESSION_SECRET = String(process.env.SESSION_SECRET || "");
+const DB_PATH = String(process.env.DB_PATH || "./algtp.db");
 
-function parseCookieGeneric(req) {
-  const raw = req.headers.cookie || "";
-  const out = {};
-  raw.split(";").forEach((p) => {
-    const i = p.indexOf("=");
-    if (i > -1) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
-  });
-  return out;
+const OWNER_CODE = String(process.env.OWNER_CODE || "").trim().toUpperCase();
+const TRIAL_DAYS = Math.max(1, Number(process.env.TRIAL_DAYS || 14));
+
+// Validate secrets
+if (!SESSION_SECRET || SESSION_SECRET.length < 24) {
+  console.warn("[WARN] SESSION_SECRET is missing/too short. Please set a long random secret.");
+}
+function is8CharCode(s) {
+  return typeof s === "string" && s.length === 8;
+}
+if (OWNER_CODE && !is8CharCode(OWNER_CODE)) {
+  throw new Error("OWNER_CODE must be exactly 8 chars.");
 }
 
-// ============================================================================
-// ✅ PIN LOCK (CLEAN + Max-Age + works on localhost)
-// ============================================================================
-const PIN_ENABLED = String(process.env.PIN_ENABLED || "true").toLowerCase() === "true";
-const PIN_CODE = String(process.env.APP_PIN_CODE || "").trim();
-const PIN_COOKIE = "algtp_pin_ok";
-const PIN_MAX_AGE_SEC = Math.max(60, Number(process.env.PIN_MAX_AGE_SEC || 86400)); // default 24h
+// -----------------------------------------------------------------------------
+// SQLite init
+// -----------------------------------------------------------------------------
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
 
-function renderPinPage(err = "") {
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP™ Secure Access</title>
-<style>
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:420px;margin:20vh auto;padding:20px;border-radius:14px;
-border:1px solid rgba(255,255,255,.14);background:#121622}
-input,button{width:100%;padding:12px;margin-top:12px;border-radius:10px;
-border:1px solid rgba(255,255,255,.2);background:#0b0d12;color:#fff;font-size:16px}
-button{cursor:pointer}
-.err{color:#ff8c8c;margin-top:10px;font-size:14px}
-</style>
-</head>
-<body>
-<div class="box">
-<h2>🔐 ALGTP™ Secure Access</h2>
-<form method="POST" action="/pin">
-  <input name="pin" type="password" placeholder="Enter PIN" autofocus />
-  <button>Unlock</button>
-</form>
-${err ? `<div class="err">${err}</div>` : ""}
-</div>
-</body>
-</html>`;
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  phone TEXT UNIQUE NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  pin_hash TEXT,
+  pin_lookup TEXT,                           -- NEW: fast lookup (HMAC of PIN)
+  role TEXT NOT NULL DEFAULT 'user',         -- 'user' | 'owner'
+  plan TEXT NOT NULL DEFAULT 'trial',        -- 'trial' | 'pro' | 'vip'
+  plan_expires_at INTEGER NOT NULL,          -- epoch ms
+  status TEXT NOT NULL DEFAULT 'active',     -- 'active' | 'blocked'
+  phone_verified INTEGER NOT NULL DEFAULT 0, -- 0|1
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_pin_lookup ON users(pin_lookup);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_lastseen ON sessions(user_id, last_seen);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_device ON sessions(user_id, device_id);
+
+CREATE TABLE IF NOT EXISTS otps (
+  id TEXT PRIMARY KEY,
+  phone TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  exp INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_otps_phone ON otps(phone);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  user_id TEXT,
+  detail TEXT
+);
+`);
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+function nowMs() {
+  return Date.now();
 }
-
-app.get("/pin", (req, res) => res.type("html").send(renderPinPage()));
-
-app.post("/pin", (req, res) => {
-  if (!PIN_CODE) return res.type("html").send(renderPinPage("PIN not configured"));
-
-  const pin = String(req.body?.pin || "").trim();
-  if (pin !== PIN_CODE) return res.type("html").send(renderPinPage("Wrong PIN"));
-
-  // cookie Secure chỉ bật khi production/https, chạy localhost http vẫn lưu cookie OK
-  const cookie = `${PIN_COOKIE}=1; Max-Age=${PIN_MAX_AGE_SEC}; Path=/; HttpOnly; SameSite=Strict${
-    IS_PROD ? "; Secure" : ""
-  }`;
-
-  res.setHeader("Set-Cookie", cookie);
-  res.redirect("/ui");
-});
-
-// PIN guard (apply ONCE)
-app.use((req, res, next) => {
-  if (!PIN_ENABLED) return next();
-
-  // bypass pin + health + api
-  if (req.path === "/pin") return next();
-  if (req.path === "/health") return next();
-  if (req.path === "/api") return next();
-  if (req.path.startsWith("/_debug")) return next(); // optional
-
-  const cookies = parseCookieGeneric(req);
-  if (cookies[PIN_COOKIE] === "1") return next();
-
-  return res.status(401).type("html").send(renderPinPage());
-});
-
-// ============================================================================
-// ✅ ENV (DECLARE ONCE ONLY)
-// ============================================================================
-const PORT = Number(process.env.PORT || 3000);
-
-const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
-const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
-const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
-
-const MASSIVE_MOVER_URL = String(
-  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
-).trim();
-
-const MASSIVE_TICKER_SNAPSHOT_URL = String(
-  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
-).trim();
-
-const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
-const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
-const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
-
-// ============================================================================
-// ✅ ACCESS LOCK (TOKEN) — CLEAN + NO REDECLARE
-// ============================================================================
-const LOCK_ENABLED = String(process.env.APP_LOCK_ENABLED || "true").toLowerCase() === "true";
-const HARD_LOCK_ENABLED = String(process.env.HARD_LOCK_ENABLED || "false").toLowerCase() === "true";
-const ACCESS_SECRET = String(process.env.APP_ACCESS_SECRET || "").trim();
-
-if (HARD_LOCK_ENABLED) {
-  const REQUIRED_ENVS = ["APP_ACCESS_SECRET", "MASSIVE_API_KEY"];
-  for (const k of REQUIRED_ENVS) {
-    if (!process.env[k] || !String(process.env[k]).trim()) {
-      console.error(`❌ FATAL: Missing required env ${k}`);
-      process.exit(1);
-    }
-  }
+function uuid() {
+  return crypto.randomUUID();
 }
-
-app.get("/_debug/env", (req, res) => {
-  const allow =
-    String(process.env.DEBUG || "false").toLowerCase() === "true" ||
-    String(process.env.ALLOW_DEBUG || "false").toLowerCase() === "true";
-
-  if (!allow) return res.status(404).json({ ok: false });
-
-  res.json({
-    ok: true,
-    pinEnabled: PIN_ENABLED,
-    lockEnabled: LOCK_ENABLED,
-    hardLockEnabled: HARD_LOCK_ENABLED,
-    hasAppAccessSecret: Boolean(ACCESS_SECRET),
-    appAccessSecretLen: ACCESS_SECRET.length,
-    hasMassiveKey: Boolean(MASSIVE_API_KEY),
-    massiveKeyLen: MASSIVE_API_KEY.length,
-    nodeEnv: process.env.NODE_ENV || null,
-  });
-});
-
-// base64url
-function b64url(input) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+function normalizePhone(phoneRaw) {
+  const s = String(phoneRaw || "").trim();
+  if (!s) return "";
+  if (s.startsWith("+")) return "+" + s.slice(1).replace(/\D/g, "");
+  return s.replace(/\D/g, "");
 }
-function b64urlJson(obj) {
-  return b64url(JSON.stringify(obj));
+function normalizeEmail(emailRaw) {
+  return String(emailRaw || "").trim().toLowerCase();
 }
-function fromB64url(str) {
-  const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
-  return Buffer.from((str + pad).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+function normalizePin(pinRaw) {
+  return String(pinRaw || "").trim().toUpperCase();
 }
-
-function deviceHash(req) {
-  const ua = String(req.headers["user-agent"] || "");
-  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
-    .split(",")[0]
-    .trim();
-  return crypto.createHash("sha256").update(ua + "|" + ip).digest("hex");
+function isLikelyEmail(s) {
+  return typeof s === "string" && s.includes("@") && s.includes(".");
 }
-
-function sign(data) {
-  return b64url(crypto.createHmac("sha256", ACCESS_SECRET).update(data).digest());
+function isLikelyPhone(s) {
+  const p = normalizePhone(s);
+  const digits = p.startsWith("+") ? p.slice(1) : p;
+  return digits.length >= 10 && digits.length <= 15;
 }
-
-function makeToken(payload) {
-  const body = b64urlJson(payload);
-  const sig = sign(body);
-  return `${body}.${sig}`;
+function planMaxDevices(plan) {
+  const p = String(plan || "trial").toLowerCase();
+  if (p === "vip") return 3;
+  if (p === "pro") return 2;
+  return 1;
 }
-
-function verifyToken(token) {
+function isExpired(user) {
+  const exp = Number(user?.plan_expires_at || 0);
+  return !exp || nowMs() >= exp;
+}
+function audit(kind, userId, detailObj) {
   try {
-    if (!ACCESS_SECRET) return { ok: false, reason: "missing_secret" };
-    if (!token) return { ok: false, reason: "missing_token" };
-
-    const parts = String(token).split(".");
-    if (parts.length !== 2) return { ok: false, reason: "bad_format" };
-
-    const [body, sig] = parts;
-    const expected = sign(body);
-
-    const a = Buffer.from(String(sig));
-    const b = Buffer.from(String(expected));
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return { ok: false, reason: "bad_signature" };
-    }
-
-    const payload = JSON.parse(fromB64url(body));
-    const exp = Number(payload?.exp);
-    if (!Number.isFinite(exp)) return { ok: false, reason: "no_exp" };
-
-    const now = Math.floor(Date.now() / 1000);
-    if (now > exp) return { ok: false, reason: "expired", exp, now };
-
-    return { ok: true, payload };
-  } catch (e) {
-    return { ok: false, reason: "verify_error", detail: String(e?.message || e) };
-  }
+    db.prepare("INSERT INTO audit_log (id, at, kind, user_id, detail) VALUES (?,?,?,?,?)").run(
+      uuid(),
+      nowMs(),
+      String(kind),
+      userId || null,
+      detailObj ? JSON.stringify(detailObj) : null
+    );
+  } catch {}
 }
 
-function renderLocked(reason = "unauthorized", extra = {}) {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP™ Locked</title>
-<style>
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;
-border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-.muted{opacity:.8;line-height:1.6}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75;white-space:pre-wrap}
-</style>
-</head>
-<body>
-<div class="box">
-<h2 style="margin:0 0 10px;">🔒 ALGTP™ Scanner Locked</h2>
-<div class="muted">Access token missing / expired / invalid.</div>
-<div class="mono" style="margin-top:10px;">Reason: ${String(reason)}${
-    extra?.exp ? `\nExp: ${extra.exp}` : ""
-  }${extra?.now ? `\nNow: ${extra.now}` : ""}</div>
-<div class="muted" style="margin-top:12px;">Please purchase / renew access to continue.</div>
-</div>
-</body>
-</html>`;
+// NEW: fast PIN lookup (HMAC)
+function pinLookup(pin) {
+  const key = SESSION_SECRET || "dev_insecure_secret_change_me";
+  return crypto.createHmac("sha256", key).update(String(pin)).digest("hex");
 }
 
-// Save token from query -> cookie (visit ?token=xxx)
-app.use((req, res, next) => {
-  if (!LOCK_ENABLED) return next();
+// Cookie
+function setSessionCookie(res, sessionId) {
+  res.cookie("algtp_sess", sessionId, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: "lax", // keep lax to work nicely with redirects/checkout
+    path: "/",
+    maxAge: 1000 * 60 * 60 * 24 * 30,
+  });
+}
+function clearSessionCookie(res) {
+  res.clearCookie("algtp_sess", { path: "/" });
+}
 
-  const t = req.query.token || req.query.t || req.query.access_token;
-  if (t) {
-    const cookie = `algtp_token=${encodeURIComponent(String(t))}; Path=/; HttpOnly; SameSite=Lax${
-      IS_PROD ? "; Secure" : ""
-    }`;
-    res.setHeader("Set-Cookie", cookie);
+// -----------------------------------------------------------------------------
+// Minimal CSRF guard for browser (Same-Origin)
+// -----------------------------------------------------------------------------
+function requireSameOrigin(req, res, next) {
+  const origin = req.headers.origin;
+  const host = req.headers.host;
+  if (!origin) return next(); // allow non-browser clients
+  try {
+    const o = new URL(origin);
+    if (o.host !== host) return res.status(403).json({ ok: false, error: "CSRF_BLOCKED" });
+  } catch {
+    // if origin malformed, block
+    return res.status(403).json({ ok: false, error: "CSRF_BLOCKED" });
   }
-  next();
-});
-
-function accessGuard(req, res, next) {
-  if (!LOCK_ENABLED) return next();
-
-  // bypass routes
-  if (req.path === "/health") return next();
-  if (req.path === "/api") return next();
-  if (req.path === "/pin") return next();
-  if (req.path.startsWith("/_debug")) return next();
-
-  const cookies = parseCookieGeneric(req);
-  const token =
-    req.headers["x-access-token"] ||
-    req.query.token ||
-    req.query.t ||
-    cookies.algtp_token;
-
-  const v = verifyToken(token);
-  if (!v.ok) return res.status(401).type("html").send(renderLocked(v.reason, v));
-
-  const currentDh = deviceHash(req);
-  if (v.payload?.dh && v.payload.dh !== currentDh) {
-    return res.status(401).type("html").send(renderLocked("device_mismatch"));
-  }
-
-  req.algtpAccess = v.payload;
   return next();
 }
 
-// ✅ apply access guard ONCE, after it’s defined
-app.use(accessGuard);
-
-// ============================================================================
-// ✅ ROUTES (YOUR ORIGINAL CODE)
-// ============================================================================
-
-// Health route (bypass)
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-function envMissing() {
-  const miss = [];
-  if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
-  if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
-  if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
-  return miss;
+// -----------------------------------------------------------------------------
+// Soft brute-force protections (simple + effective)
+// -----------------------------------------------------------------------------
+const ipGate = new Map(); // ip -> {count, until}
+function ipHit(ip, maxFails = 8, lockMs = 5 * 60 * 1000) {
+  const now = nowMs();
+  const a = ipGate.get(ip) || { count: 0, until: 0 };
+  if (a.until && now < a.until) return { blocked: true, waitMs: a.until - now };
+  a.count += 1;
+  if (a.count >= maxFails) {
+    a.until = now + lockMs;
+    a.count = 0;
+  }
+  ipGate.set(ip, a);
+  return { blocked: false };
+}
+function ipClear(ip) {
+  ipGate.delete(ip);
 }
 
-function auth(params = {}, headers = {}) {
-  const t = String(MASSIVE_AUTH_TYPE).toLowerCase();
-
-  if (t === "query") params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
-  else if (t === "xapi") headers["x-api-key"] = MASSIVE_API_KEY;
-  else if (t === "bearer") headers["authorization"] = `Bearer ${MASSIVE_API_KEY}`;
-  else params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
-
-  headers["user-agent"] =
-    headers["user-agent"] ||
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
-
-  return { params, headers };
+// OTP rate limit per phone
+const otpGate = new Map(); // phone -> {count, resetAt}
+function otpCanSend(phone, limit = 3, windowMs = 10 * 60 * 1000) {
+  const now = nowMs();
+  const g = otpGate.get(phone) || { count: 0, resetAt: now + windowMs };
+  if (now > g.resetAt) {
+    g.count = 0;
+    g.resetAt = now + windowMs;
+  }
+  if (g.count >= limit) return { ok: false, waitMs: g.resetAt - now };
+  g.count += 1;
+  otpGate.set(phone, g);
+  return { ok: true };
 }
 
-function parseSymbols(input) {
-  return String(input || "")
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
-}
+// -----------------------------------------------------------------------------
+// Sessions (Option C) create/refresh + enforce device limit by plan
+// -----------------------------------------------------------------------------
+function createOrRefreshSession({ userId, deviceId, userPlan }) {
+  const now = nowMs();
 
-async function mapPool(items, concurrency, fn) {
-  const out = new Array(items.length);
-  let i = 0;
+  const existing = db
+    .prepare("SELECT id FROM sessions WHERE user_id=? AND device_id=? LIMIT 1")
+    .get(userId, deviceId);
 
-  async function worker() {
-    while (true) {
-      const idx = i++;
-      if (idx >= items.length) return;
-      out[idx] = await fn(items[idx], idx);
-    }
+  let sessionId;
+  if (existing?.id) {
+    sessionId = existing.id;
+    db.prepare("UPDATE sessions SET last_seen=? WHERE id=?").run(now, sessionId);
+  } else {
+    sessionId = uuid();
+    db.prepare(
+      "INSERT INTO sessions (id, user_id, device_id, created_at, last_seen) VALUES (?,?,?,?,?)"
+    ).run(sessionId, userId, deviceId, now, now);
   }
 
-  const workers = Array.from({ length: concurrency }, () => worker());
-  await Promise.all(workers);
-  return out;
+  const max = planMaxDevices(userPlan);
+  const rows = db
+    .prepare("SELECT id FROM sessions WHERE user_id=? ORDER BY last_seen DESC")
+    .all(userId);
+
+  let kicked = false;
+  if (rows.length > max) {
+    kicked = true;
+    const toDelete = rows.slice(max).map((r) => r.id);
+    const del = db.prepare("DELETE FROM sessions WHERE id=?");
+    const tx = db.transaction((ids) => ids.forEach((id) => del.run(id)));
+    tx(toDelete);
+  }
+
+  return { sessionId, kicked };
 }
 
-function demandScore(row) {
-  const gap = Math.abs(n(row?.gapPct) ?? 0);
-  const pc = Math.abs(n(row?.pricePct) ?? 0);
+// -----------------------------------------------------------------------------
+// Auth middleware
+// -----------------------------------------------------------------------------
+function requireAuth(req, res, next) {
+  const sid = req.cookies.algtp_sess;
+  if (!sid) return res.status(401).redirect("/");
 
-  let s = 0;
-  if (gap >= 20) s += 1;
-  if (gap >= 40) s += 1;
-  if (gap >= 60) s += 1;
-  if (pc >= 10) s += 1;
-  if (pc >= 20) s += 1;
+  const s = db.prepare("SELECT * FROM sessions WHERE id=?").get(sid);
+  if (!s) return res.status(401).redirect("/");
 
-  return clamp(s, 0, 5);
-}
-function signalIcon(d) {
-  if (d >= 5) return "🚀";
-  if (d >= 4) return "🔥";
-  if (d >= 3) return "👀";
-  return "⛔️";
-}
+  const u = db.prepare("SELECT * FROM users WHERE id=?").get(s.user_id);
+  if (!u) return res.status(401).redirect("/");
+  if (u.status !== "active") return res.status(403).send("Account blocked.");
 
-function axiosFail(e) {
-  if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
-
-  const code = e.code || null;
-  const msg = e.message || "axios error";
-  const url = e.config?.url || null;
-
-  if (!e.response) return { kind: "network", code, message: msg, url };
-
-  const status = e.response.status;
-  const data = e.response.data;
-  const bodyPreview = typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data).slice(0, 800);
-  return { kind: "http", status, message: msg, url, bodyPreview };
-}
-
-async function safeGet(url, { params, headers }) {
   try {
-    const r = await axios.get(url, {
-      params,
-      headers,
-      timeout: 25000,
-      validateStatus: () => true,
+    db.prepare("UPDATE sessions SET last_seen=? WHERE id=?").run(nowMs(), sid);
+  } catch {}
+
+  req.user_db = u;
+  req.session = s;
+  next();
+}
+
+function requireOwner(req, res, next) {
+  if (!req.user_db || req.user_db.role !== "owner") return res.status(403).send("Forbidden");
+  next();
+}
+
+// HARD BLOCK UI: expired -> /billing
+function blockExpiredUI(req, res, next) {
+  if (isExpired(req.user_db)) return res.redirect("/billing");
+  next();
+}
+
+// HARD BLOCK API: expired -> 402
+function blockExpiredAPI(req, res, next) {
+  if (isExpired(req.user_db)) {
+    return res.status(402).json({
+      ok: false,
+      error: "PLAN_EXPIRED",
+      plan: req.user_db.plan,
+      plan_expires_at: req.user_db.plan_expires_at,
     });
-    return { ok: r.status < 400, status: r.status, data: r.data, url };
-  } catch (e) {
-    return { ok: false, status: null, data: null, url, errorDetail: axiosFail(e) };
   }
+  next();
 }
 
-async function fetchMovers(direction = "gainers") {
-  const d = String(direction || "gainers").toLowerCase().trim();
-  const directionSafe = d === "losers" ? "losers" : "gainers";
+// -----------------------------------------------------------------------------
+// Email
+// -----------------------------------------------------------------------------
+async function sendEmail(to, subject, html) {
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.EMAIL_FROM || user;
 
-  const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
-  const url = `${base}/${directionSafe}`;
-
-  const params = {};
-  const headers = {};
-  if (INCLUDE_OTC) params["include_otc"] = "true";
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-
-  const rows = Array.isArray(r.data?.tickers)
-    ? r.data.tickers
-    : Array.isArray(r.data?.results)
-    ? r.data.results
-    : Array.isArray(r.data?.data)
-    ? r.data.data
-    : null;
-
-  return {
-    ok: r.ok && Array.isArray(rows),
-    url,
-    status: r.status,
-    rows: Array.isArray(rows) ? rows : [],
-    sample: Array.isArray(rows) ? rows[0] : r.data,
-    errorDetail: r.errorDetail,
-  };
-}
-
-async function fetchTickerSnapshot(ticker) {
-  const base = MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "");
-  const url = `${base}/${encodeURIComponent(String(ticker || "").trim().toUpperCase())}`;
-
-  const params = {};
-  const headers = {};
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-  return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
-}
-
-function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
-  if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
-
-  const wanted = new Set(candidateKeys.map((k) => String(k).toLowerCase()));
-  const q = [{ v: obj, path: "root" }];
-  let visited = 0;
-
-  while (q.length && visited < maxNodes) {
-    const { v, path } = q.shift();
-    visited++;
-
-    if (!v || typeof v !== "object") continue;
-
-    if (Array.isArray(v)) {
-      for (let i = 0; i < v.length; i++) {
-        const item = v[i];
-        if (item && typeof item === "object") q.push({ v: item, path: `${path}[${i}]` });
-      }
-      continue;
-    }
-
-    for (const k of Object.keys(v)) {
-      const keyLower = String(k).toLowerCase();
-      const val = v[k];
-
-      if (wanted.has(keyLower)) {
-        const num = n(val);
-        if (num !== null) return { value: num, path: `${path}.${k}`, keyMatched: k };
-      }
-
-      if (val && typeof val === "object") q.push({ v: val, path: `${path}.${k}` });
-    }
-  }
-
-  return { value: null, path: null, keyMatched: null };
-}
-
-function capCategory(marketCap) {
-  const mc = n(marketCap);
-  if (mc === null) return null;
-  if (mc < 2_000_000_000) return "small";
-  if (mc < 10_000_000_000) return "mid";
-  return "big";
-}
-
-function floatCategory(floatShares) {
-  const fs = n(floatShares);
-  if (fs === null) return null;
-  if (fs < 10_000_000) return "nano";
-  if (fs < 20_000_000) return "low";
-  if (fs < 50_000_000) return "mid";
-  return "high";
-}
-
-function normalizeSnapshotAuto(ticker, snap) {
-  const root = snap?.results ?? snap ?? {};
-  const day = root?.day ?? root?.todays ?? root?.today ?? null;
-  const prev = root?.prevDay ?? root?.previousDay ?? root?.prev ?? null;
-
-  const lastTradePrice =
-    n(root?.lastTrade?.p) ??
-    n(root?.lastTrade?.price) ??
-    n(root?.last?.p) ??
-    n(root?.last) ??
-    n(root?.price) ??
-    null;
-
-  const dayClose = n(day?.c ?? day?.close ?? root?.close ?? root?.dayClose) ?? null;
-  const prevClose = n(prev?.c ?? prev?.close ?? root?.prevClose ?? root?.previousClose) ?? null;
-
-  let price = lastTradePrice ?? dayClose ?? null;
-  let open = n(day?.o ?? day?.open ?? root?.open) ?? null;
-  let volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
-
-  let pricePct =
-    n(root?.todaysChangePerc) ??
-    n(root?.todaysChangePercent) ??
-    n(root?.changePerc) ??
-    n(root?.changePercent) ??
-    null;
-
-  if (price === null) {
-    const fp = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]);
-    price = fp.value;
-  }
-
-  if (open === null) {
-    const fo = findFirstNumberByKeys(root, ["open", "o"]);
-    open = fo.value;
-  }
-
-  let prevC = prevClose;
-  if (prevC === null) {
-    const fpc = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]);
-    prevC = fpc.value;
-  }
-
-  if (volume === null) {
-    const fv = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]);
-    volume = fv.value;
-  }
-
-  if (pricePct === null) {
-    const fchg = findFirstNumberByKeys(root, [
-      "todayschangeperc",
-      "todayschangepercent",
-      "changepct",
-      "changepercent",
-      "pctchange",
-      "percentchange",
-    ]);
-    pricePct = fchg.value;
-  }
-
-  if (pricePct === null && price !== null && prevC !== null && prevC > 0) {
-    pricePct = ((price - prevC) / prevC) * 100;
-  }
-
-  const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
-
-  // Float
-  let floatShares =
-    n(root?.float) ??
-    n(root?.freeFloat) ??
-    n(root?.sharesFloat) ??
-    n(root?.floatShares) ??
-    null;
-
-  if (floatShares === null) {
-    const ff = findFirstNumberByKeys(root, [
-      "float",
-      "freefloat",
-      "free_float",
-      "sharesfloat",
-      "floatshares",
-      "publicfloat",
-      "public_float",
-    ]);
-    floatShares = ff.value;
-  }
-
-  // Market cap
-  let marketCap =
-    n(root?.marketCap) ??
-    n(root?.marketcap) ??
-    n(root?.mktcap) ??
-    n(root?.market_cap) ??
-    n(root?.marketCapitalization) ??
-    null;
-
-  if (marketCap === null) {
-    const mc = findFirstNumberByKeys(root, [
-      "marketcap",
-      "marketCap",
-      "mktcap",
-      "market_cap",
-      "marketcapitalization",
-      "marketCapitalization",
-      "cap",
-      "capitalization",
-    ]);
-    marketCap = mc.value;
-  }
-
-  return {
-    symbol: String(ticker || "").trim().toUpperCase(),
-    price: price !== null ? round2(price) : null,
-    pricePct: pricePct !== null ? round2(pricePct) : null,
-    gapPct: gapPct !== null ? round2(gapPct) : null,
-    volume: volume !== null ? Math.round(volume) : null,
-
-    floatShares: floatShares !== null ? Math.round(floatShares) : null,
-    floatM: floatShares !== null ? round2(floatShares / 1_000_000) : null,
-    floatCat: floatCategory(floatShares),
-
-    marketCap: marketCap !== null ? Math.round(marketCap) : null,
-    marketCapB: marketCap !== null ? round2(marketCap / 1_000_000_000) : null,
-    cap: capCategory(marketCap),
-  };
-}
-
-function groupToDirection(group) {
-  if (group === "topLosers") return "losers";
-  return "gainers";
-}
-
-function sortRowsByGroup(rows, group) {
-  if (group === "topGappers") {
-    rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
+  if (!host || !user || !pass) {
+    console.log("[EMAIL DEV FALLBACK]", { to, subject, html: html?.slice(0, 200) });
     return;
   }
-  rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  await transporter.sendMail({ from, to, subject, html });
 }
 
-function capPass(row, cap) {
-  const c = String(cap || "all").toLowerCase();
-  if (c === "all") return true;
-  if (!row.cap) return false;
-  return row.cap === c;
+// -----------------------------------------------------------------------------
+// SMS OTP send
+// -----------------------------------------------------------------------------
+async function sendOtpSms(phone, code) {
+  const from = process.env.TWILIO_FROM;
+  if (twilioClient && from) {
+    await twilioClient.messages.create({
+      to: phone.startsWith("+") ? phone : `+${phone}`,
+      from,
+      body: `ALGTP OTP: ${code} (expires in 5 minutes)`,
+    });
+    return;
+  }
+  console.log(`[OTP DEV FALLBACK] phone=${phone} code=${code}`);
 }
 
-// ============================================================================
-// ✅ UI (GIỮ NGUYÊN UI BẠN ĐÃ DÁN) — MÌNH KHÔNG ĐỔI LOGIC UI
-// ============================================================================
-function renderUI(preset = {}) {
-  // *** NOTE: Đây là nguyên UI code bạn đã gửi ***
-  // Bạn dán phần renderUI(...) đầy đủ của bạn ở đây (y chang)
-  // (Mình giữ trống để tránh message quá dài; nhưng bạn đã có UI ở file bạn.)
-  return "<html><body>Paste your full renderUI here</body></html>";
+// -----------------------------------------------------------------------------
+// Pages (simple HTML)
+// -----------------------------------------------------------------------------
+function pageLoginHtml() {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP™ Secure Access</title>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto;background:#0b0f19;color:#e8eefc;display:flex;min-height:100vh;align-items:center;justify-content:center}
+    .card{width:min(520px,92vw);background:linear-gradient(180deg,#111a2e,#0b0f19);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:20px 18px;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+    h1{font-size:18px;margin:0 0 12px}
+    .muted{color:rgba(232,238,252,.7);font-size:13px;margin:0 0 14px}
+    input,button{width:100%;font-size:15px;border-radius:14px;border:1px solid rgba(255,255,255,.12);padding:12px 14px;background:rgba(255,255,255,.04);color:#e8eefc;outline:none}
+    button{margin-top:10px;background:linear-gradient(90deg,#5b7cfa,#a855f7);border:none;font-weight:700;cursor:pointer}
+    .row{display:flex;gap:10px;margin-top:10px}
+    .row button{width:auto;flex:1}
+    .msg{margin-top:10px;font-size:13px;color:#ffb4b4;min-height:18px}
+    .ok{color:#b6ffcb}
+    .small{font-size:12px;color:rgba(232,238,252,.65)}
+    a{color:#9db3ff}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔐 ALGTP™ Secure Access</h1>
+    <p class="muted">One box. Enter <b>phone</b> (OTP) or <b>8-char PIN</b>. New users register with phone + email.</p>
+
+    <div class="small">Device ID is stored locally to manage device limits by plan.</div>
+
+    <form id="boxForm">
+      <input id="box" placeholder="Phone number OR 8-char PIN code" autocomplete="one-time-code" />
+      <button type="submit">Continue</button>
+      <div class="msg" id="msg"></div>
+    </form>
+
+    <div class="row">
+      <button id="btnRegister" type="button">Register (phone + email)</button>
+      <button id="btnLogout" type="button">Logout</button>
+    </div>
+
+    <div style="margin-top:10px" class="small">
+      After OTP verify, set your 8-char PIN for fast login.
+      <br/>Need billing? <a href="/billing">Go to billing</a>
+    </div>
+  </div>
+
+<script>
+function getDeviceId(){
+  let id = localStorage.getItem("algtp_device_id");
+  if(!id){
+    id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    localStorage.setItem("algtp_device_id", id);
+  }
+  return id;
+}
+function normPhone(s){
+  s = String(s||"").trim();
+  if(!s) return "";
+  if(s.startsWith("+")) return "+" + s.slice(1).replace(/\\D/g,"");
+  return s.replace(/\\D/g,"");
+}
+const msgEl = document.getElementById("msg");
+function setMsg(t, ok=false){
+  msgEl.textContent = t || "";
+  msgEl.className = "msg " + (ok ? "ok" : "");
+}
+document.getElementById("boxForm").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  setMsg("");
+  const raw = document.getElementById("box").value.trim();
+  const device_id = getDeviceId();
+
+  if(raw.length === 8){
+    const r = await fetch("/auth/unlock", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ code: raw.toUpperCase(), device_id })
+    });
+    const j = await r.json().catch(()=> ({}));
+    if(r.ok && j.ok){
+      setMsg("Unlocked. Redirecting...", true);
+      location.href = "/app";
+    } else setMsg(j.error || "Unlock failed");
+    return;
+  }
+
+  const p = normPhone(raw);
+  const digits = p.startsWith("+") ? p.slice(1) : p;
+  if(digits.length >= 10 && digits.length <= 15){
+    const r = await fetch("/auth/otp/request", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ phone: p, device_id })
+    });
+    const j = await r.json().catch(()=> ({}));
+    if(r.ok && j.ok){
+      const otp = prompt("Enter OTP sent to your phone:");
+      if(!otp) return;
+      const r2 = await fetch("/auth/otp/verify",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ phone: p, otp: String(otp).trim(), device_id })
+      });
+      const j2 = await r2.json().catch(()=> ({}));
+      if(r2.ok && j2.ok){
+        setMsg("Verified. Redirecting...", true);
+        location.href = "/app";
+      } else setMsg(j2.error || "OTP verify failed");
+    } else setMsg(j.error || "OTP request failed");
+    return;
+  }
+
+  setMsg("Enter phone number (to receive OTP) OR 8-char PIN code.");
+});
+
+document.getElementById("btnRegister").addEventListener("click", async ()=>{
+  setMsg("");
+  const device_id = getDeviceId();
+  const phone = prompt("Enter phone (required):");
+  if(!phone) return;
+  const email = prompt("Enter email (required):");
+  if(!email) return;
+
+  const r = await fetch("/auth/register", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ phone, email, device_id })
+  });
+  const j = await r.json().catch(()=> ({}));
+  if(r.ok && j.ok) setMsg("Registered. Now request OTP by entering your phone in the box.", true);
+  else setMsg(j.error || "Register failed");
+});
+
+document.getElementById("btnLogout").addEventListener("click", async ()=>{
+  await fetch("/auth/logout", { method:"POST" }).catch(()=>{});
+  setMsg("Logged out.", true);
+});
+</script>
+</body>
+</html>`;
 }
 
-// UI routes (bạn thay lại renderUI bản đầy đủ của bạn)
-app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 50 })));
-app.get("/ui/gainers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 50 })));
-app.get("/ui/losers", (req, res) => res.type("html").send(renderUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 50 })));
-app.get("/ui/gappers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gappers", group: "topGappers", cap: "all", limit: 80, minGap: 10 })));
-app.get("/ui/smallcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/smallcap", group: "topGainers", cap: "small", limit: 80 })));
-app.get("/ui/midcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80 })));
-app.get("/ui/bigcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80 })));
+function pageAppHtml(u) {
+  const now = Date.now();
+  const exp = Number(u.plan_expires_at || 0);
+  const daysLeft = exp ? Math.max(0, Math.ceil((exp - now) / (24 * 60 * 60 * 1000))) : 0;
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP™ App</title>
+  <style>
+    body{margin:0;font-family:system-ui;background:#0b0f19;color:#e8eefc;padding:16px}
+    .card{max-width:760px;margin:0 auto;background:#111a2e;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .pill{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px}
+    button{padding:10px 12px;border-radius:14px;border:none;background:linear-gradient(90deg,#5b7cfa,#a855f7);color:#fff;font-weight:700;cursor:pointer}
+    input{padding:10px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;outline:none}
+    .msg{margin-top:10px;font-size:13px}
+    a{color:#9db3ff}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 style="margin:0 0 10px">🚀 ALGTP™ App</h2>
+    <div class="row" style="margin-bottom:12px">
+      <div class="pill">Plan: <b>${u.plan}</b></div>
+      <div class="pill">Expires: <b>${new Date(exp).toLocaleString()}</b></div>
+      <div class="pill">Days left: <b>${daysLeft}</b></div>
+      <div class="pill">Devices allowed: <b>${planMaxDevices(u.plan)}</b></div>
+    </div>
 
-// ============================================================================
-// ✅ API ROUTES
-// ============================================================================
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "ALGTP™ – Algorithmic Trading Platform Scanner running ✅",
-    ui: "/ui",
-    pages: ["/ui", "/ui/gainers", "/ui/losers", "/ui/gappers", "/ui/smallcap", "/ui/midcap", "/ui/bigcap"],
-    examples: ["/list?group=topGappers&limit=80&cap=all&minGap=10", "/scan?symbols=NVDA,TSLA,AAPL"],
+    <div style="margin:10px 0 6px">Set / change your fast PIN (8 chars):</div>
+    <div class="row">
+      <input id="pin" maxlength="8" placeholder="AB12CD34" />
+      <button id="setPin">Save PIN</button>
+      <button id="billing">Billing</button>
+      <button id="logout">Logout</button>
+    </div>
+    <div class="msg" id="msg"></div>
+
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,.08);margin:14px 0"/>
+
+    <div>
+      <div style="margin-bottom:8px">Example paid API call (blocked when expired):</div>
+      <button id="scanBtn">Run Scan (demo)</button>
+      <div class="msg" id="scanMsg"></div>
+    </div>
+
+    <div style="margin-top:12px;font-size:12px;color:rgba(232,238,252,.65)">
+      Note: When trial expires, you will be redirected to <a href="/billing">/billing</a>.
+    </div>
+  </div>
+
+<script>
+const msg = (t, ok=false) => {
+  const el = document.getElementById("msg");
+  el.textContent = t || "";
+  el.style.color = ok ? "#b6ffcb" : "#ffb4b4";
+};
+
+document.getElementById("setPin").addEventListener("click", async ()=>{
+  const pin = String(document.getElementById("pin").value || "").trim().toUpperCase();
+  if(pin.length !== 8) return msg("PIN must be exactly 8 chars.");
+  const r = await fetch("/auth/pin/set", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ pin })
   });
+  const j = await r.json().catch(()=> ({}));
+  if(r.ok && j.ok) msg("PIN saved.", true);
+  else msg(j.error || "Failed");
 });
 
-app.get("/api", (req, res) => {
-  res.json({
-    ok: true,
-    envMissing: envMissing(),
-    config: {
-      port: PORT,
-      authType: MASSIVE_AUTH_TYPE,
-      queryKeyName: MASSIVE_QUERY_KEYNAME,
-      moverUrl: MASSIVE_MOVER_URL,
-      tickerSnapshotUrl: MASSIVE_TICKER_SNAPSHOT_URL,
-      includeOtc: INCLUDE_OTC,
-      snapConcurrency: SNAP_CONCURRENCY,
-      debug: DEBUG,
-    },
-  });
+document.getElementById("billing").addEventListener("click", ()=> location.href="/billing");
+document.getElementById("logout").addEventListener("click", async ()=>{
+  await fetch("/auth/logout", { method:"POST" }).catch(()=>{});
+  location.href="/";
 });
 
-app.get("/env", (req, res) => {
-  res.json({
-    ok: true,
-    hasKey: Boolean(MASSIVE_API_KEY),
-    authType: MASSIVE_AUTH_TYPE,
-    queryKeyName: MASSIVE_QUERY_KEYNAME,
-    moverBase: MASSIVE_MOVER_URL,
-    tickerBase: MASSIVE_TICKER_SNAPSHOT_URL,
-  });
+document.getElementById("scanBtn").addEventListener("click", async ()=>{
+  const el = document.getElementById("scanMsg");
+  el.textContent = "";
+  const r = await fetch("/api/scan_demo", { method:"POST" });
+  const j = await r.json().catch(()=> ({}));
+  if(r.status === 402){
+    location.href="/billing";
+    return;
+  }
+  el.textContent = JSON.stringify(j);
+});
+</script>
+</body>
+</html>`;
+}
+
+function pageBillingHtml(u) {
+  const now = nowMs();
+  const exp = Number(u.plan_expires_at || 0);
+  const expired = now >= exp;
+  const daysLeft = exp ? Math.max(0, Math.ceil((exp - now) / (24 * 60 * 60 * 1000))) : 0;
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP™ Billing</title>
+  <style>
+    body{margin:0;font-family:system-ui;background:#0b0f19;color:#e8eefc;padding:16px}
+    .card{max-width:760px;margin:0 auto;background:#111a2e;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .pill{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);font-size:12px}
+    button{padding:10px 12px;border-radius:14px;border:none;background:linear-gradient(90deg,#5b7cfa,#a855f7);color:#fff;font-weight:800;cursor:pointer}
+    input,select{padding:10px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#fff;outline:none}
+    .warn{color:#ffb4b4}
+    .ok{color:#b6ffcb}
+    a{color:#9db3ff}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 style="margin:0 0 10px">💳 ALGTP™ Billing</h2>
+
+    <div class="row" style="margin-bottom:12px">
+      <div class="pill">Plan: <b>${u.plan}</b></div>
+      <div class="pill">Expires: <b>${new Date(exp).toLocaleString()}</b></div>
+      <div class="pill">Days left: <b>${daysLeft}</b></div>
+      <div class="pill">Status: <b class="${expired ? "warn" : "ok"}">${expired ? "EXPIRED" : "ACTIVE"}</b></div>
+    </div>
+
+    <div class="${expired ? "warn" : ""}" style="margin-bottom:12px">
+      ${expired ? "Your access has expired. Upgrade to continue using the app." : "Upgrade any time to extend access."}
+    </div>
+
+    <div class="row" style="margin-bottom:8px">
+      <button onclick="location.href='/app'">Go App</button>
+      <button onclick="location.href='/'">Login</button>
+      <button id="logout">Logout</button>
+    </div>
+
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,.08);margin:14px 0"/>
+
+    <div style="margin-bottom:8px">Admin-only quick grant (for manual payments / testing):</div>
+    <div class="row">
+      <select id="plan">
+        <option value="pro">pro</option>
+        <option value="vip">vip</option>
+      </select>
+      <input id="days" type="number" min="1" value="30" style="width:120px"/>
+      <button id="grant">Grant to ME</button>
+    </div>
+    <div id="msg" style="margin-top:10px;font-size:13px"></div>
+
+    <div style="margin-top:14px;font-size:12px;color:rgba(232,238,252,.65)">
+      In production, replace this with your Stripe/Whop checkout buttons and webhook that calls the same logic as /admin/grant.
+    </div>
+  </div>
+
+<script>
+const msg = (t, ok=false) => {
+  const el = document.getElementById("msg");
+  el.textContent = t || "";
+  el.style.color = ok ? "#b6ffcb" : "#ffb4b4";
+};
+
+document.getElementById("logout").addEventListener("click", async ()=>{
+  await fetch("/auth/logout", { method:"POST" }).catch(()=>{});
+  location.href="/";
 });
 
-// Symbols scan endpoint
-app.get("/scan", async (req, res) => {
+document.getElementById("grant").addEventListener("click", async ()=>{
+  const plan = document.getElementById("plan").value;
+  const days = Number(document.getElementById("days").value || 30);
+
+  const r = await fetch("/admin/grant_me", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ plan, days })
+  });
+
+  const j = await r.json().catch(()=> ({}));
+  if(r.ok && j.ok){
+    msg("Granted. Refreshing...", true);
+    setTimeout(()=> location.reload(), 600);
+  } else msg(j.error || "Grant failed");
+});
+</script>
+</body>
+</html>`;
+}
+
+// -----------------------------------------------------------------------------
+// Routes: Pages
+// -----------------------------------------------------------------------------
+app.get("/", (req, res) => res.type("html").send(pageLoginHtml()));
+
+app.get("/app", requireAuth, blockExpiredUI, (req, res) => {
+  res.type("html").send(pageAppHtml(req.user_db));
+});
+app.get("/app/*", requireAuth, blockExpiredUI, (req, res) => {
+  res.type("html").send(pageAppHtml(req.user_db));
+});
+
+app.get("/billing", requireAuth, (req, res) => {
+  res.type("html").send(pageBillingHtml(req.user_db));
+});
+
+// -----------------------------------------------------------------------------
+// Auth Routes
+// -----------------------------------------------------------------------------
+function getIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+}
+
+// Register
+app.post("/auth/register", (req, res) => {
+  const ip = getIp(req);
+  const gate = ipHit(ip, 10, 5 * 60 * 1000);
+  if (gate.blocked) return res.status(429).json({ ok: false, error: "TOO_MANY_TRIES" });
+
+  const phone = normalizePhone(req.body.phone);
+  const email = normalizeEmail(req.body.email);
+
+  if (!phone || !isLikelyPhone(phone)) return res.status(400).json({ ok: false, error: "BAD_PHONE" });
+  if (!email || !isLikelyEmail(email)) return res.status(400).json({ ok: false, error: "BAD_EMAIL" });
+
+  const userId = uuid();
+  const exp = nowMs() + TRIAL_DAYS * 24 * 60 * 60 * 1000;
+
   try {
-    const miss = envMissing();
-    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+    db.prepare(
+      `INSERT INTO users (id, phone, email, pin_hash, pin_lookup, role, plan, plan_expires_at, status, phone_verified, created_at)
+       VALUES (?, ?, ?, NULL, NULL, 'user', 'trial', ?, 'active', 0, ?)`
+    ).run(userId, phone, email, exp, nowMs());
 
-    const symbols = parseSymbols(req.query.symbols || "NVDA,TSLA,AAPL").slice(0, 100);
+    audit("register", userId, { phone, email, trial_days: TRIAL_DAYS, plan_expires_at: exp });
 
-    const snaps = await mapPool(symbols, SNAP_CONCURRENCY, async (t) => {
-      const r = await fetchTickerSnapshot(t);
-      return { ticker: t, ...r };
-    });
+    sendEmail(email, "Welcome to ALGTP™ Trial", `<div>
+      <h3>Welcome to ALGTP™</h3>
+      <p>Your trial is active for <b>${TRIAL_DAYS} days</b>.</p>
+      <p>Verify phone via OTP to access.</p>
+    </div>`).catch(() => {});
 
-    const good = snaps.filter((x) => x.ok);
-    const bad = snaps.filter((x) => !x.ok);
-
-    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
-    rows = rows.map((r) => {
-      const d = demandScore(r);
-      return { ...r, demandScore: d, signalIcon: signalIcon(d) };
-    });
-
-    rows.sort(
-      (a, b) =>
-        (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
-        Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
-    );
-
-    res.json({
-      ok: true,
-      mode: "symbols",
-      results: rows,
-      snapshotErrors: DEBUG
-        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
-        : undefined,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "Scan failed", detail: String(e?.message || e) });
+    ipClear(ip);
+    return res.json({ ok: true, user_id: userId, plan: "trial", plan_expires_at: exp });
+  } catch {
+    return res.status(409).json({ ok: false, error: "PHONE_OR_EMAIL_ALREADY_USED" });
   }
 });
 
-// Group list endpoint
-app.get("/list", async (req, res) => {
+// OTP request
+app.post("/auth/otp/request", async (req, res) => {
+  const ip = getIp(req);
+  const gate = ipHit(ip, 12, 5 * 60 * 1000);
+  if (gate.blocked) return res.status(429).json({ ok: false, error: "TOO_MANY_TRIES" });
+
+  const phone = normalizePhone(req.body.phone);
+  const deviceId = String(req.body.device_id || "").trim();
+  if (!deviceId) return res.status(400).json({ ok: false, error: "MISSING_DEVICE" });
+  if (!phone || !isLikelyPhone(phone)) return res.status(400).json({ ok: false, error: "BAD_PHONE" });
+
+  const u = db.prepare("SELECT * FROM users WHERE phone=?").get(phone);
+  if (!u) return res.status(404).json({ ok: false, error: "USER_NOT_FOUND" });
+  if (u.status !== "active") return res.status(403).json({ ok: false, error: "BLOCKED" });
+
+  // allow OTP even if expired (so they can login to billing)
+  const gate2 = otpCanSend(phone);
+  if (!gate2.ok) return res.status(429).json({ ok: false, error: "OTP_RATE_LIMIT", wait_ms: gate2.waitMs });
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const codeHash = await bcrypt.hash(code, 10);
+  const exp = nowMs() + 5 * 60 * 1000;
+
+  db.prepare("DELETE FROM otps WHERE phone=?").run(phone);
+  db.prepare("INSERT INTO otps (id, phone, code_hash, exp, tries, created_at) VALUES (?,?,?,?,0,?)").run(
+    uuid(),
+    phone,
+    codeHash,
+    exp,
+    nowMs()
+  );
+
+  audit("otp_request", u.id, { phone, deviceId });
+
   try {
-    const miss = envMissing();
-    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+    await sendOtpSms(phone, code);
+  } catch (e) {
+    console.log("OTP send error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "OTP_SEND_FAILED" });
+  }
 
-    const group = String(req.query.group || "topGainers").trim();
-    const cap = String(req.query.cap || "all").trim().toLowerCase();
-    const limit = clamp(Number(req.query.limit || 50), 5, 200);
-    const minGap = n(req.query.minGap);
+  ipClear(ip);
+  return res.json({ ok: true });
+});
 
-    const direction = groupToDirection(group);
-    const movers = await fetchMovers(direction);
-    if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
+// OTP verify
+app.post("/auth/otp/verify", async (req, res) => {
+  const ip = getIp(req);
+  const gate = ipHit(ip, 12, 5 * 60 * 1000);
+  if (gate.blocked) return res.status(429).json({ ok: false, error: "TOO_MANY_TRIES" });
 
-    const tickers = movers.rows
-      .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
-      .filter(Boolean)
-      .slice(0, limit);
+  const phone = normalizePhone(req.body.phone);
+  const otp = String(req.body.otp || "").trim();
+  const deviceId = String(req.body.device_id || "").trim();
+  if (!deviceId) return res.status(400).json({ ok: false, error: "MISSING_DEVICE" });
 
-    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
-      const r = await fetchTickerSnapshot(t);
-      return { ticker: t, ...r };
-    });
+  if (!phone || !isLikelyPhone(phone)) return res.status(400).json({ ok: false, error: "BAD_PHONE" });
+  if (!otp || otp.length < 4) return res.status(400).json({ ok: false, error: "BAD_OTP" });
 
-    const good = snaps.filter((x) => x.ok);
-    const bad = snaps.filter((x) => !x.ok);
+  const u = db.prepare("SELECT * FROM users WHERE phone=?").get(phone);
+  if (!u) return res.status(404).json({ ok: false, error: "USER_NOT_FOUND" });
+  if (u.status !== "active") return res.status(403).json({ ok: false, error: "BLOCKED" });
 
-    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
-    rows = rows.map((r) => {
-      const d = demandScore(r);
-      return { ...r, demandScore: d, signalIcon: signalIcon(d) };
-    });
+  const rec = db.prepare("SELECT * FROM otps WHERE phone=?").get(phone);
+  if (!rec) return res.status(401).json({ ok: false, error: "OTP_NOT_FOUND" });
+  if (nowMs() >= Number(rec.exp)) {
+    db.prepare("DELETE FROM otps WHERE phone=?").run(phone);
+    return res.status(401).json({ ok: false, error: "OTP_EXPIRED" });
+  }
+  if (Number(rec.tries) >= 5) return res.status(429).json({ ok: false, error: "OTP_TOO_MANY_TRIES" });
 
-    rows = rows.filter((r) => capPass(r, cap));
+  const ok = await bcrypt.compare(otp, rec.code_hash);
+  if (!ok) {
+    db.prepare("UPDATE otps SET tries=tries+1 WHERE id=?").run(rec.id);
+    return res.status(401).json({ ok: false, error: "OTP_INVALID" });
+  }
 
-    if (minGap !== null && Number.isFinite(minGap)) {
-      rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
+  db.prepare("DELETE FROM otps WHERE phone=?").run(phone);
+  if (!u.phone_verified) db.prepare("UPDATE users SET phone_verified=1 WHERE id=?").run(u.id);
+
+  const { sessionId, kicked } = createOrRefreshSession({
+    userId: u.id,
+    deviceId,
+    userPlan: u.plan,
+  });
+
+  setSessionCookie(res, sessionId);
+  audit("otp_verify_ok", u.id, { deviceId, kicked });
+
+  ipClear(ip);
+  return res.json({
+    ok: true,
+    plan: u.plan,
+    plan_expires_at: u.plan_expires_at,
+    kicked,
+    expired: isExpired(u),
+  });
+});
+
+// PIN unlock (FAST)
+app.post("/auth/unlock", async (req, res) => {
+  const ip = getIp(req);
+  const gate = ipHit(ip, 10, 5 * 60 * 1000);
+  if (gate.blocked) return res.status(429).json({ ok: false, error: "TOO_MANY_TRIES" });
+
+  const code = normalizePin(req.body.code);
+  const deviceId = String(req.body.device_id || "").trim();
+  if (!deviceId) return res.status(400).json({ ok: false, error: "MISSING_DEVICE" });
+  if (!is8CharCode(code)) return res.status(400).json({ ok: false, error: "CODE_MUST_BE_8" });
+
+  // Owner master code
+  if (OWNER_CODE && code === OWNER_CODE) {
+    const ownerPhone = "+10000000000";
+    const ownerEmail = "owner@algtp.local";
+    let owner = db.prepare("SELECT * FROM users WHERE role='owner' LIMIT 1").get();
+
+    if (!owner) {
+      const ownerId = uuid();
+      const exp = nowMs() + 3650 * 24 * 60 * 60 * 1000;
+      db.prepare(
+        `INSERT INTO users (id, phone, email, pin_hash, pin_lookup, role, plan, plan_expires_at, status, phone_verified, created_at)
+         VALUES (?, ?, ?, NULL, NULL, 'owner', 'vip', ?, 'active', 1, ?)`
+      ).run(ownerId, ownerPhone, ownerEmail, exp, nowMs());
+      owner = db.prepare("SELECT * FROM users WHERE id=?").get(ownerId);
+      audit("owner_created", ownerId, {});
     }
 
-    sortRowsByGroup(rows, group);
-
-    res.json({
-      ok: true,
-      mode: "group",
-      group,
-      cap,
-      limitRequested: limit,
-      results: rows,
-      snapshotErrors: DEBUG
-        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
-        : undefined,
+    const { sessionId } = createOrRefreshSession({
+      userId: owner.id,
+      deviceId,
+      userPlan: "vip",
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "List failed", detail: String(e?.message || e) });
+
+    setSessionCookie(res, sessionId);
+    audit("owner_unlock", owner.id, { deviceId });
+
+    ipClear(ip);
+    return res.json({ ok: true, role: "owner", plan: owner.plan, plan_expires_at: owner.plan_expires_at });
   }
+
+  // Normal PIN lookup using pin_lookup
+  const lookup = pinLookup(code);
+  const c = db
+    .prepare("SELECT * FROM users WHERE pin_lookup=? AND status='active' LIMIT 1")
+    .get(lookup);
+
+  if (!c || !c.pin_hash) return res.status(401).json({ ok: false, error: "INVALID_CODE" });
+
+  const ok = await bcrypt.compare(code, c.pin_hash);
+  if (!ok) return res.status(401).json({ ok: false, error: "INVALID_CODE" });
+
+  const { sessionId, kicked } = createOrRefreshSession({
+    userId: c.id,
+    deviceId,
+    userPlan: c.plan,
+  });
+
+  setSessionCookie(res, sessionId);
+  audit("pin_unlock_ok", c.id, { deviceId, kicked });
+
+  ipClear(ip);
+  return res.json({
+    ok: true,
+    role: c.role,
+    plan: c.plan,
+    plan_expires_at: c.plan_expires_at,
+    kicked,
+    expired: isExpired(c),
+  });
 });
 
-// ============================================================================
-// ✅ START
-// ============================================================================
+// Set/change PIN (must be logged in) + CSRF guard
+app.post("/auth/pin/set", requireAuth, requireSameOrigin, async (req, res) => {
+  const pin = normalizePin(req.body.pin);
+  if (!is8CharCode(pin)) return res.status(400).json({ ok: false, error: "PIN_MUST_BE_8" });
+
+  const hash = await bcrypt.hash(pin, 10);
+  const lookup = pinLookup(pin);
+  db.prepare("UPDATE users SET pin_hash=?, pin_lookup=? WHERE id=?").run(hash, lookup, req.user_db.id);
+
+  audit("pin_set", req.user_db.id, {});
+  res.json({ ok: true });
+});
+
+// Auth info
+app.get("/auth/me", requireAuth, (req, res) => {
+  const u = req.user_db;
+  res.json({
+    ok: true,
+    id: u.id,
+    phone: u.phone,
+    email: u.email,
+    role: u.role,
+    plan: u.plan,
+    plan_expires_at: Number(u.plan_expires_at || 0),
+    expired: isExpired(u),
+    devices_allowed: planMaxDevices(u.plan),
+  });
+});
+
+// Logout + CSRF guard
+app.post("/auth/logout", requireSameOrigin, (req, res) => {
+  const sid = req.cookies.algtp_sess;
+  if (sid) {
+    try {
+      db.prepare("DELETE FROM sessions WHERE id=?").run(sid);
+    } catch {}
+  }
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+// -----------------------------------------------------------------------------
+// Admin: grant plan (manual) — owner only
+// -----------------------------------------------------------------------------
+function extendPlan(userId, plan, days) {
+  const now = nowMs();
+  const u = db.prepare("SELECT plan_expires_at FROM users WHERE id=?").get(userId);
+  const base = u?.plan_expires_at && Number(u.plan_expires_at) > now ? Number(u.plan_expires_at) : now;
+  const exp = base + Number(days) * 24 * 60 * 60 * 1000;
+
+  db.prepare("UPDATE users SET plan=?, plan_expires_at=? WHERE id=?").run(plan, exp, userId);
+  return exp;
+}
+
+app.post("/admin/grant_me", requireAuth, requireOwner, requireSameOrigin, (req, res) => {
+  const plan = String(req.body.plan || "pro").toLowerCase();
+  const days = Math.max(1, Number(req.body.days || 30));
+  if (!["pro", "vip"].includes(plan)) return res.status(400).json({ ok: false, error: "BAD_PLAN" });
+
+  const exp = extendPlan(req.user_db.id, plan, days);
+  audit("grant_me", req.user_db.id, { plan, days, new_exp: exp });
+
+  res.json({ ok: true, plan, plan_expires_at: exp });
+});
+
+app.post("/admin/grant_user", requireAuth, requireOwner, requireSameOrigin, (req, res) => {
+  const userId = String(req.body.user_id || "").trim();
+  const plan = String(req.body.plan || "pro").toLowerCase();
+  const days = Math.max(1, Number(req.body.days || 30));
+  if (!userId) return res.status(400).json({ ok: false, error: "MISSING_USER_ID" });
+  if (!["pro", "vip"].includes(plan)) return res.status(400).json({ ok: false, error: "BAD_PLAN" });
+
+  const u = db.prepare("SELECT id FROM users WHERE id=?").get(userId);
+  if (!u) return res.status(404).json({ ok: false, error: "USER_NOT_FOUND" });
+
+  const exp = extendPlan(userId, plan, days);
+  audit("grant_user", req.user_db.id, { target: userId, plan, days, new_exp: exp });
+
+  res.json({ ok: true, user_id: userId, plan, plan_expires_at: exp });
+});
+
+// -----------------------------------------------------------------------------
+// Example paid API (blocked when expired)
+// -----------------------------------------------------------------------------
+app.post("/api/scan_demo", requireAuth, blockExpiredAPI, (req, res) => {
+  res.json({ ok: true, message: "Scan executed (demo).", at: new Date().toISOString() });
+});
+
+// -----------------------------------------------------------------------------
+// Cleanup job (sessions / audit / otps)
+// -----------------------------------------------------------------------------
+function cleanup() {
+  const now = nowMs();
+  try {
+    db.prepare("DELETE FROM sessions WHERE last_seen < ?").run(now - 90 * 24 * 60 * 60 * 1000);
+  } catch {}
+  try {
+    db.prepare("DELETE FROM otps WHERE exp < ?").run(now - 60 * 60 * 1000);
+  } catch {}
+  try {
+    db.prepare("DELETE FROM audit_log WHERE at < ?").run(now - 180 * 24 * 60 * 60 * 1000);
+  } catch {}
+}
+cleanup();
+setInterval(cleanup, 12 * 60 * 60 * 1000);
+
+// -----------------------------------------------------------------------------
+// Start
+// -----------------------------------------------------------------------------
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
-  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
-  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
+  console.log(`ALGTP™ SaaS server running on http://localhost:${PORT}`);
+  console.log(`DB: ${DB_PATH}`);
+  console.log(`Trial days: ${TRIAL_DAYS}`);
+  console.log(`Owner code set: ${OWNER_CODE ? "YES" : "NO"}`);
 });

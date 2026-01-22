@@ -21,30 +21,43 @@
  *    Toggle + interval seconds, refreshes current mode (Group scan or Symbols scan)
  * - Symbols Scan:
  *    GET /scan?symbols=NVDA,TSLA,AAPL
+ *
+ * - ✅ SMS OTP Login (minimal)
+ *    /login, /auth/start, /auth/verify
+ *    Guard: /ui* + /list + /scan
+ *    Twilio delivery status callback: /sms-status (logs)
  */
 
 require("dotenv").config();
+
 const express = require("express");
 const axios = require("axios");
+const twilio = require("twilio");
 
-
+const app = express();
+app.use(express.json());
 
 /* =========================
    ✅ MINIMAL SMS OTP LOGIN (ONLY)
-   - No token/HMAC/device bind/plan lock
    - After verify: set cookie algtp_login=1
    - Guard only: /ui* + /list + /scan
    - SMS provider: Twilio
+   - Status Callback: /sms-status
 ========================= */
-
-const twilio = require("twilio");
 
 // Twilio ENV
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
 const TWILIO_FROM = String(process.env.TWILIO_FROM || "").trim(); // ex: "+1xxxxxxxxxx"
+
+// TTL
 const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // 5 min
-const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
+
+// Cookie secure recommended on Render (https)
+const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "true").toLowerCase() === "true";
+
+// Public base url (Render sets RENDER_EXTERNAL_URL on many setups; fallback at runtime)
+const STATIC_PUBLIC_BASE = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").trim();
 
 const hasTwilio = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
@@ -55,7 +68,6 @@ const otpStore = new Map();
 function nowMs() {
   return Date.now();
 }
-
 function cleanupOtp() {
   const t = nowMs();
   for (const [k, v] of otpStore.entries()) if (v.expMs <= t) otpStore.delete(k);
@@ -72,11 +84,13 @@ function parseCookie(req) {
 }
 
 function setCookie(res, name, value, maxAgeSec) {
-  const parts = [`${name}=${encodeURIComponent(value)}`, "Path=/", "SameSite=Lax", `Max-Age=${maxAgeSec}`];
-  // bạn muốn tối giản => không bắt buộc HttpOnly
-  // nếu muốn an toàn hơn chút thì thêm HttpOnly
-  // parts.push("HttpOnly");
-
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    "Path=/",
+    "SameSite=Lax",
+    `Max-Age=${maxAgeSec}`,
+    "HttpOnly", // safer
+  ];
   if (COOKIE_SECURE) parts.push("Secure");
   res.setHeader("Set-Cookie", parts.join("; "));
 }
@@ -144,8 +158,8 @@ async function startOtp(){
     body: JSON.stringify({ phone })
   });
   const d = await r.json();
-  if(!d.ok) alert("Error: " + (d.error||"failed"));
-  else alert("OTP sent");
+  if(!d.ok) alert("Error: " + (d.detail || d.error || "failed"));
+  else alert("OTP sent (check your phone)");
 }
 async function verifyOtp(){
   const phone = document.getElementById("phone").value.trim();
@@ -156,18 +170,40 @@ async function verifyOtp(){
     body: JSON.stringify({ phone, otp })
   });
   const d = await r.json();
-  if(!d.ok) alert("Error: " + (d.error||"failed"));
+  if(!d.ok) alert("Error: " + (d.detail || d.error || "failed"));
   else location.href="/ui";
 }
 </script>
 </body></html>`;
 }
 
-const app = express();
-app.use(express.json());
-
 // ✅ login routes
 app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
+
+/**
+ * ✅ Twilio SMS delivery status callback
+ * Twilio will POST form-urlencoded fields (MessageSid, MessageStatus, ErrorCode...)
+ * This endpoint must be publicly accessible and not blocked by auth.
+ */
+app.post("/sms-status", express.urlencoded({ extended: false }), (req, res) => {
+  console.log("📩 SMS STATUS:", {
+    MessageSid: req.body.MessageSid,
+    MessageStatus: req.body.MessageStatus,
+    To: req.body.To,
+    From: req.body.From,
+    ErrorCode: req.body.ErrorCode,
+    ErrorMessage: req.body.ErrorMessage,
+  });
+  res.status(200).send("ok");
+});
+
+// Helper to compute base URL for statusCallback
+function getPublicBaseUrl(req) {
+  if (STATIC_PUBLIC_BASE) return STATIC_PUBLIC_BASE.replace(/\/+$/, "");
+  const proto = (req.headers["x-forwarded-proto"] || "http").toString().split(",")[0].trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}`.replace(/\/+$/, "");
+}
 
 /* ---- Send OTP ---- */
 app.post("/auth/start", async (req, res) => {
@@ -181,14 +217,24 @@ app.post("/auth/start", async (req, res) => {
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     otpStore.set(phone, { otp, expMs: nowMs() + OTP_TTL_SEC * 1000 });
 
+    const base = getPublicBaseUrl(req);
+
+    // ✅ carrier-friendly message (avoid brand/emoji/links while testing)
     await tw.messages.create({
       from: TWILIO_FROM,
       to: phone,
-      body: `ALGTP OTP: ${otp} (exp ${Math.round(OTP_TTL_SEC / 60)}m)`,
+      body: `${otp} is your verification code.`,
+      statusCallback: `${base}/sms-status`,
     });
 
     res.json({ ok: true });
   } catch (e) {
+    console.error("TWILIO_SEND_FAILED:", {
+      message: e?.message,
+      code: e?.code,
+      status: e?.status,
+      moreInfo: e?.moreInfo,
+    });
     res.status(500).json({ ok: false, error: "send_failed", detail: String(e?.message || e) });
   }
 });
@@ -229,17 +275,15 @@ app.post("/logout", (req, res) => {
 app.use((req, res, next) => {
   const path = req.path || "";
 
-  const needsLogin =
-    path === "/ui" || path.startsWith("/ui/") || path === "/list" || path === "/scan";
-
+  const needsLogin = path === "/ui" || path.startsWith("/ui/") || path === "/list" || path === "/scan";
   if (!needsLogin) return next();
 
   const cookies = parseCookie(req);
   if (cookies.algtp_login === "1") return next();
 
-  // not logged in -> go login
   return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
 });
+
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);

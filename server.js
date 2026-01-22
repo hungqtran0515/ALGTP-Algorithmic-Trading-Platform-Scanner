@@ -27,8 +27,217 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 
+/* =========================
+   ✅ MINIMAL SMS OTP LOGIN (ONLY)
+   - No token/HMAC/device bind/plan lock
+   - After verify: set cookie algtp_login=1
+   - Guard only: /ui* + /list + /scan
+   - SMS provider: Twilio
+========================= */
+
+const twilio = require("twilio");
+
+// Twilio ENV
+const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
+const TWILIO_AUTH_TOKEN = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
+const TWILIO_FROM = String(process.env.TWILIO_FROM || "").trim(); // ex: "+1xxxxxxxxxx"
+const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // 5 min
+const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
+
+const hasTwilio = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
+const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
+
+// store OTP in memory: phone -> { otp, expMs }
+const otpStore = new Map();
+
+function nowMs() {
+  return Date.now();
+}
+
+function cleanupOtp() {
+  const t = nowMs();
+  for (const [k, v] of otpStore.entries()) if (v.expMs <= t) otpStore.delete(k);
+}
+
+function parseCookie(req) {
+  const raw = req.headers.cookie || "";
+  const out = {};
+  raw.split(";").forEach((p) => {
+    const i = p.indexOf("=");
+    if (i > -1) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
+  });
+  return out;
+}
+
+function setCookie(res, name, value, maxAgeSec) {
+  const parts = [`${name}=${encodeURIComponent(value)}`, "Path=/", "SameSite=Lax", `Max-Age=${maxAgeSec}`];
+  // bạn muốn tối giản => không bắt buộc HttpOnly
+  // nếu muốn an toàn hơn chút thì thêm HttpOnly
+  // parts.push("HttpOnly");
+
+  if (COOKIE_SECURE) parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function normalizePhone(input) {
+  let s = String(input || "").trim();
+  if (!s) return null;
+
+  // remove spaces/dashes/()
+  s = s.replace(/[^\d+]/g, "");
+
+  // +1xxxxxxxxxx
+  if (s.startsWith("+")) {
+    const digits = s.slice(1).replace(/\D/g, "");
+    if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+    if (digits.length === 10) return "+1" + digits;
+    return null;
+  }
+
+  // digits only: 12199868683 or 2199868683
+  const digits = s.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+  if (digits.length === 10) return "+1" + digits;
+  return null;
+}
+
+/* ---- Login Page (simple) ---- */
+function renderLoginPage(msg = "") {
+  return `<!doctype html>
+<html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP Login</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+.box{max-width:560px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:10px;padding:12px;font-size:14px}
+button{cursor:pointer;margin-top:10px}
+.muted{opacity:.8;font-size:13px;line-height:1.6}
+.err{margin-top:10px;color:#ffb4b4}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+</style>
+</head><body>
+<div class="box">
+  <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
+  <div class="muted">Chỉ SMS OTP verify là vào được. Scanner giữ nguyên.</div>
+  <div class="mono" style="margin-top:8px;">Format: 12199868683 / 2199868683 / +12199868683</div>
+  ${msg ? `<div class="err">${msg}</div>` : ""}
+
+  <input id="phone" placeholder="Phone" />
+  <button onclick="startOtp()">Send OTP</button>
+
+  <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
+  <button onclick="verifyOtp()">Verify</button>
+
+  <div class="muted" style="margin-top:12px;">Sau verify: tự chuyển qua <span class="mono">/ui</span></div>
+</div>
+
+<script>
+async function startOtp(){
+  const phone = document.getElementById("phone").value.trim();
+  const r = await fetch("/auth/start", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ phone })
+  });
+  const d = await r.json();
+  if(!d.ok) alert("Error: " + (d.error||"failed"));
+  else alert("OTP sent");
+}
+async function verifyOtp(){
+  const phone = document.getElementById("phone").value.trim();
+  const otp = document.getElementById("otp").value.trim();
+  const r = await fetch("/auth/verify", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ phone, otp })
+  });
+  const d = await r.json();
+  if(!d.ok) alert("Error: " + (d.error||"failed"));
+  else location.href="/ui";
+}
+</script>
+</body></html>`;
+}
+
 const app = express();
 app.use(express.json());
+
+// ✅ login routes
+app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
+
+/* ---- Send OTP ---- */
+app.post("/auth/start", async (req, res) => {
+  try {
+    cleanupOtp();
+    if (!hasTwilio) return res.status(500).json({ ok: false, error: "Twilio env missing" });
+
+    const phone = normalizePhone(req.body?.phone);
+    if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
+
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    otpStore.set(phone, { otp, expMs: nowMs() + OTP_TTL_SEC * 1000 });
+
+    await tw.messages.create({
+      from: TWILIO_FROM,
+      to: phone,
+      body: `ALGTP OTP: ${otp} (exp ${Math.round(OTP_TTL_SEC / 60)}m)`,
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "send_failed", detail: String(e?.message || e) });
+  }
+});
+
+/* ---- Verify OTP -> set login cookie ---- */
+app.post("/auth/verify", (req, res) => {
+  cleanupOtp();
+
+  const phone = normalizePhone(req.body?.phone);
+  const otp = String(req.body?.otp || "").trim();
+
+  if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
+  if (!/^\d{6}$/.test(otp)) return res.status(400).json({ ok: false, error: "OTP must be 6 digits" });
+
+  const rec = otpStore.get(phone);
+  if (!rec) return res.status(401).json({ ok: false, error: "OTP expired/not found" });
+  if (rec.expMs <= nowMs()) {
+    otpStore.delete(phone);
+    return res.status(401).json({ ok: false, error: "OTP expired" });
+  }
+  if (rec.otp !== otp) return res.status(401).json({ ok: false, error: "OTP wrong" });
+
+  otpStore.delete(phone);
+
+  // ✅ Minimal login flag cookie (7 days)
+  setCookie(res, "algtp_login", "1", 7 * 24 * 3600);
+
+  res.json({ ok: true });
+});
+
+/* ---- Optional logout ---- */
+app.post("/logout", (req, res) => {
+  setCookie(res, "algtp_login", "", 0);
+  res.json({ ok: true });
+});
+
+/* ---- Guard ONLY scanner endpoints ---- */
+app.use((req, res, next) => {
+  const path = req.path || "";
+
+  const needsLogin =
+    path === "/ui" || path.startsWith("/ui/") || path === "/list" || path === "/scan";
+
+  if (!needsLogin) return next();
+
+  const cookies = parseCookie(req);
+  if (cookies.algtp_login === "1") return next();
+
+  // not logged in -> go login
+  return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
+});
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);
@@ -327,12 +536,7 @@ function normalizeSnapshotAuto(ticker, snap) {
   const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
 
   // Float
-  let floatShares =
-    n(root?.float) ??
-    n(root?.freeFloat) ??
-    n(root?.sharesFloat) ??
-    n(root?.floatShares) ??
-    null;
+  let floatShares = n(root?.float) ?? n(root?.freeFloat) ?? n(root?.sharesFloat) ?? n(root?.floatShares) ?? null;
 
   if (floatShares === null) {
     const ff = findFirstNumberByKeys(root, [
@@ -1013,8 +1217,7 @@ app.get("/scan", async (req, res) => {
 
     rows.sort(
       (a, b) =>
-        (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
-        Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
+        (b.demandScore ?? 0) - (a.demandScore ?? 0) || Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
     );
 
     res.json({

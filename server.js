@@ -284,7 +284,6 @@ app.use((req, res, next) => {
   return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
 });
 
-
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);
 
@@ -642,7 +641,6 @@ function groupToDirection(group) {
   if (group === "topLosers") return "losers";
   return "gainers";
 }
-
 function sortRowsByGroup(rows, group) {
   if (group === "topGappers") {
     rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
@@ -650,7 +648,6 @@ function sortRowsByGroup(rows, group) {
   }
   rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
 }
-
 function capPass(row, cap) {
   const c = String(cap || "all").toLowerCase();
   if (c === "all") return true;
@@ -948,7 +945,7 @@ async function enableNotifications(){
   }
 }
 
-// -------- Chart Modal (click ticker) --------
+// -------- Chart Modal --------
 const modalBack = byId("modalBack");
 const modalTitle = byId("modalTitle");
 const chartBox = byId("chartBox");
@@ -1239,7 +1236,7 @@ app.get("/env", (req, res) => {
   });
 });
 
-// Symbols scan endpoint (for TSLA/NVDA anytime)
+// Symbols scan endpoint
 app.get("/scan", async (req, res) => {
   try {
     const miss = envMissing();
@@ -1338,11 +1335,9 @@ app.get("/list", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  const base =
-    process.env.RENDER_EXTERNAL_URL ||
-    `http://localhost:${PORT}`;
-
+  const base = STATIC_PUBLIC_BASE || `http://localhost:${PORT}`;
   console.log(`✅ ALGTP™ Scanner running ${base}`);
   console.log(`🚀 UI: ${base}/ui`);
+  console.log(`🔐 Login: ${base}/login`);
+  console.log(`📩 SMS status callback: ${base}/sms-status`);
 });
-

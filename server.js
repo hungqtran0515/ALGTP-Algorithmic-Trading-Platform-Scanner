@@ -1,12 +1,16 @@
 /**
- * server.js — ALGTP™ – Algorithmic Trading Platform Scanner (FULL + Multi-Page UI + Alerts + Auto Refresh + Scan Symbols)
+ * server.js — ALGTP™ Algorithmic Trading Platform Scanner
+ * (Full Build: Multi-Page UI + Alerts + Auto Refresh + Symbol Scanning + SMS OTP Login)
  *
- * Features:
- * - Single list (no S05/S04 sections)
+ * Features
+ * - Single unified list (no S05/S04 sections)
  * - Groups: topGainers | topLosers | topGappers
- * - Filters: cap=all|small|mid|big, minGap (for gappers)
- * - Adds: Float + MarketCap (auto-detect if present in snapshot)
- * - UI Pages:
+ * - Filters:
+ *    - cap = all | small | mid | big
+ *    - minGap (for gappers)
+ * - Adds Float + Market Cap (auto-detect if present in snapshot)
+ *
+ * UI Pages
  *    /ui            (dashboard)
  *    /ui/gainers    (preset)
  *    /ui/losers     (preset)
@@ -15,17 +19,22 @@
  *    /ui/midcap     (preset cap=mid)
  *    /ui/bigcap     (preset cap=big)
  *
- * - Alerts (UI):
- *    Sound + Desktop notifications (anti-spam per symbol per session)
- * - Auto Refresh (UI):
- *    Toggle + interval seconds, refreshes current mode (Group scan or Symbols scan)
- * - Symbols Scan:
- *    GET /scan?symbols=NVDA,TSLA,AAPL
+ * Alerts (UI)
+ * - Sound + Desktop notifications
+ * - Anti-spam: one alert per symbol per session
  *
- * - ✅ SMS OTP Login (minimal)
- *    /login, /auth/start, /auth/verify
- *    Guard: /ui* + /list + /scan
- *    Twilio delivery status callback: /sms-status (logs)
+ * Auto Refresh (UI)
+ * - Toggle + interval (seconds)
+ * - Refreshes the current mode (Group scan or Symbols scan)
+ *
+ * Symbols Scan
+ * - GET /scan?symbols=NVDA,TSLA,AAPL
+ *
+ * ✅ Minimal SMS OTP Login
+ * - Routes: /login, /auth/start, /auth/verify
+ * - Guarded endpoints: /ui* + /list + /scan
+ * - SMS provider: Twilio
+ * - Delivery status callback: /sms-status (logs status + error details)
  */
 
 require("dotenv").config();
@@ -39,8 +48,8 @@ app.use(express.json());
 
 /* =========================
    ✅ MINIMAL SMS OTP LOGIN (ONLY)
-   - After verify: set cookie algtp_login=1
-   - Guard only: /ui* + /list + /scan
+   - After verification: sets cookie algtp_login=1
+   - Guards only: /ui* + /list + /scan
    - SMS provider: Twilio
    - Status Callback: /sms-status
 ========================= */
@@ -48,21 +57,21 @@ app.use(express.json());
 // Twilio ENV
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
-const TWILIO_FROM = String(process.env.TWILIO_FROM || "").trim(); // ex: "+1xxxxxxxxxx"
+const TWILIO_FROM = String(process.env.TWILIO_FROM || "").trim(); // e.g. "+1xxxxxxxxxx"
 
 // TTL
-const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // 5 min
+const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // 5 minutes default
 
-// Cookie secure recommended on Render (https)
+// Cookie secure recommended on Render (HTTPS)
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "true").toLowerCase() === "true";
 
-// Public base url (Render sets RENDER_EXTERNAL_URL on many setups; fallback at runtime)
+// Public base URL (Render often sets RENDER_EXTERNAL_URL; fallback at runtime)
 const STATIC_PUBLIC_BASE = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").trim();
 
 const hasTwilio = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
-// store OTP in memory: phone -> { otp, expMs }
+// Store OTP in memory: phone -> { otp, expMs }
 const otpStore = new Map();
 
 function nowMs() {
@@ -99,7 +108,7 @@ function normalizePhone(input) {
   let s = String(input || "").trim();
   if (!s) return null;
 
-  // remove spaces/dashes/()
+  // remove spaces/dashes/parentheses
   s = s.replace(/[^\d+]/g, "");
 
   // +1xxxxxxxxxx
@@ -136,17 +145,17 @@ button{cursor:pointer;margin-top:10px}
 </head><body>
 <div class="box">
   <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
-  <div class="muted">Chỉ SMS OTP verify là vào được. Scanner giữ nguyên.</div>
+  <div class="muted">Access requires SMS OTP verification. The scanner functionality remains unchanged.</div>
   <div class="mono" style="margin-top:8px;">Format: 12199868683 / 2199868683 / +12199868683</div>
   ${msg ? `<div class="err">${msg}</div>` : ""}
 
-  <input id="phone" placeholder="Phone" />
+  <input id="phone" placeholder="Phone number" />
   <button onclick="startOtp()">Send OTP</button>
 
-  <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
+  <input id="otp" placeholder="6-digit OTP" style="margin-top:12px;" />
   <button onclick="verifyOtp()">Verify</button>
 
-  <div class="muted" style="margin-top:12px;">Sau verify: tự chuyển qua <span class="mono">/ui</span></div>
+  <div class="muted" style="margin-top:12px;">After verification, you will be redirected to <span class="mono">/ui</span>.</div>
 </div>
 
 <script>
@@ -159,7 +168,7 @@ async function startOtp(){
   });
   const d = await r.json();
   if(!d.ok) alert("Error: " + (d.detail || d.error || "failed"));
-  else alert("OTP sent (check your phone)");
+  else alert("OTP sent. Please check your phone.");
 }
 async function verifyOtp(){
   const phone = document.getElementById("phone").value.trim();
@@ -182,8 +191,8 @@ app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
 
 /**
  * ✅ Twilio SMS delivery status callback
- * Twilio will POST form-urlencoded fields (MessageSid, MessageStatus, ErrorCode...)
- * This endpoint must be publicly accessible and not blocked by auth.
+ * Twilio will POST form-urlencoded fields (MessageSid, MessageStatus, ErrorCode, etc.)
+ * This endpoint must be publicly accessible and must NOT be behind auth.
  */
 app.post("/sms-status", express.urlencoded({ extended: false }), (req, res) => {
   console.log("📩 SMS STATUS:", {
@@ -212,14 +221,14 @@ app.post("/auth/start", async (req, res) => {
     if (!hasTwilio) return res.status(500).json({ ok: false, error: "Twilio env missing" });
 
     const phone = normalizePhone(req.body?.phone);
-    if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
+    if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone number" });
 
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     otpStore.set(phone, { otp, expMs: nowMs() + OTP_TTL_SEC * 1000 });
 
     const base = getPublicBaseUrl(req);
 
-    // ✅ carrier-friendly message (avoid brand/emoji/links while testing)
+    // ✅ Carrier-friendly message (avoid branding/emoji/links while testing)
     await tw.messages.create({
       from: TWILIO_FROM,
       to: phone,
@@ -246,16 +255,16 @@ app.post("/auth/verify", (req, res) => {
   const phone = normalizePhone(req.body?.phone);
   const otp = String(req.body?.otp || "").trim();
 
-  if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
+  if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone number" });
   if (!/^\d{6}$/.test(otp)) return res.status(400).json({ ok: false, error: "OTP must be 6 digits" });
 
   const rec = otpStore.get(phone);
-  if (!rec) return res.status(401).json({ ok: false, error: "OTP expired/not found" });
+  if (!rec) return res.status(401).json({ ok: false, error: "OTP expired or not found" });
   if (rec.expMs <= nowMs()) {
     otpStore.delete(phone);
     return res.status(401).json({ ok: false, error: "OTP expired" });
   }
-  if (rec.otp !== otp) return res.status(401).json({ ok: false, error: "OTP wrong" });
+  if (rec.otp !== otp) return res.status(401).json({ ok: false, error: "Incorrect OTP" });
 
   otpStore.delete(phone);
 
@@ -281,8 +290,9 @@ app.use((req, res, next) => {
   const cookies = parseCookie(req);
   if (cookies.algtp_login === "1") return next();
 
-  return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
+  return res.status(401).type("html").send(renderLoginPage("Please log in using SMS OTP."));
 });
+
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);

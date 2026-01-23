@@ -582,15 +582,7 @@ app.get("/scan", (req, res) => {
   res.json({ ok: true, note: "Replace /scan with your real logic", example: "/scan?symbols=NVDA,TSLA,AAPL" });
 });
 
-// =========================
-// START
-// =========================
-app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Server running on port ${PORT}`);
-  console.log(`🚀 UI: /ui`);
-  console.log(`🔐 Login: /login`);
-  console.log(`🔎 Scan: /scan?symbols=NVDA,TSLA,AAPL`);
-});
+
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);

@@ -533,10 +533,4 @@ app.listen(PORT, () => {
 
 
 
-const PORT = Number(process.env.PORT || 3000);
-
-app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ running on port ${PORT}`);
-  console.log(`➡️ UI: /ui`);
-});
 

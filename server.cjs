@@ -14,7 +14,7 @@
  *  GET /group?name=topGainers&limit=20
  *  GET /scan?symbols=NVDA,TSLA,AAPL
  */
-console.log("NODE VERSION =", process.version);
+
 
 require("dotenv").config();
 const express = require("express");

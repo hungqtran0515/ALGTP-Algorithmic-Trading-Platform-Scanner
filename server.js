@@ -585,7 +585,7 @@ app.get("/scan", (req, res) => {
 
 
 // ---------------- ENV ----------------
-const PORT = Number(process.env.PORT || 3000);
+
 
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
 const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();

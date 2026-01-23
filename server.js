@@ -19,17 +19,33 @@ app.use(express.json());
 
 
 /* =========================
-   ✅ OTP (Twilio) ENV
+   ✅ OTP (Twilio) ENV (FIX)
 ========================= */
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN  = String(process.env.TWILIO_AUTH_TOKEN  || "").trim();
-const TWILIO_FROM        = String(process.env.TWILIO_FROM        || "").trim();
-const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
 
+// FIX: remove spaces/dashes in TWILIO_FROM, keep + and digits only
+const TWILIO_FROM = String(process.env.TWILIO_FROM || "")
+  .trim()
+  .replace(/[^\d+]/g, ""); // "+1 708 578..." -> "+1708578..."
+
+const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
 
-const hasTwilio = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
+// FIX: strict boolean
+const hasTwilio = Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM);
+
+// OPTIONAL: quick format check (E.164)
+function isE164(s) {
+  return /^\+\d{10,15}$/.test(String(s || ""));
+}
+
+if (hasTwilio && !isE164(TWILIO_FROM)) {
+  console.log("⚠️ TWILIO_FROM invalid E.164:", TWILIO_FROM);
+}
+
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
+
 
 // In-memory OTP store: phone -> { otp, expMs }
 const otpStore = new Map();

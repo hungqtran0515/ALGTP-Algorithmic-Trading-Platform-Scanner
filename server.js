@@ -1,10 +1,3 @@
-// =========================
-// ALGTP SERVER (CLEAN BUILD)
-// - No duplicate PORT
-// - No duplicate functions
-// - No raw HTML/CSS outside template strings
-// - Works on Render + Custom domain
-// =========================
 
 // =========================
 // ALGTP SERVER (CLEAN BUILD)

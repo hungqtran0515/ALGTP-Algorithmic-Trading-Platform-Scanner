@@ -1,21 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
@@ -1396,7 +1378,11 @@ app.get("/list", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
-  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
-  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
+  console.log("====================================");
+  console.log(`✅ ALGTP™ Server running: http://localhost:${PORT}`);
+  console.log(`🔐 Login:  http://localhost:${PORT}/login`);
+  console.log(`🚀 UI:     http://localhost:${PORT}/ui`);
+  console.log(`🔎 Scan:   http://localhost:${PORT}/scan?symbols=NVDA,TSLA,AAPL`);
+  console.log("====================================");
 });
+

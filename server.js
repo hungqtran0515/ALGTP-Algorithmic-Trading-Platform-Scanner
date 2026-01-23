@@ -118,34 +118,56 @@ function normalizePhone(input) {
 
   return null;
 }
-function renderLoginPage(msg = "") {
+// =========================
+// PAYWALL RENDER (SAFE)
+// =========================
+
+// fallback formatter
+function fmtDate(ms) {
+  try {
+    return new Date(ms).toLocaleString("en-US");
+  } catch {
+    return "-";
+  }
+}
+
+function renderPaywallPage(access) {
+  access = access || {};
+  const user = access.user || {};
+  const trialEnd = user.trial_end ? fmtDate(user.trial_end) : "-";
+
   return `<!doctype html>
-  <html>
-    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-    <body style="font-family:system-ui;background:#0b0d12;color:#e6e8ef">
-      <div style="max-width:560px;margin:10vh auto;padding:18px;border:1px solid rgba(255,255,255,.14);border-radius:14px;background:rgba(18,24,43,.55)">
-        <h2>🔐 Login (SMS OTP)</h2>
-        ${msg ? `<div style="color:#ffb4b4;margin:10px 0">${msg}</div>` : ""}
-        <input id="phone" placeholder="Phone" style="width:100%;padding:12px;border-radius:10px;margin:6px 0" />
-        <button onclick="startOtp()" style="width:100%;padding:12px;border-radius:10px">Send OTP</button>
-        <input id="otp" placeholder="OTP 6 digits" style="width:100%;padding:12px;border-radius:10px;margin:12px 0 6px" />
-        <button onclick="verifyOtp()" style="width:100%;padding:12px;border-radius:10px">Verify</button>
-      </div>
-      <script>
-      async function startOtp(){
-        const phone=document.getElementById("phone").value.trim();
-        const r=await fetch("/auth/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone})});
-        const d=await r.json(); if(!d.ok) alert(d.error||"failed"); else alert("OTP sent");
-      }
-      async function verifyOtp(){
-        const phone=document.getElementById("phone").value.trim();
-        const otp=document.getElementById("otp").value.trim();
-        const r=await fetch("/auth/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone,otp})});
-        const d=await r.json(); if(!d.ok) alert(d.error||"failed"); else location.href="/ui";
-      }
-      </script>
-    </body>
-  </html>`;
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP Access</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+a{text-decoration:none}
+.btn{background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;margin-right:10px;display:inline-block}
+.btn:hover{border-color:rgba(255,255,255,.28)}
+.muted{opacity:.85;line-height:1.7}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+</style>
+</head>
+<body>
+<div class="box">
+  <h2>⛔ Trial expired / Access blocked</h2>
+  <div class="muted">
+    Trial <b>${TRIAL_DAYS} ngày</b> đã hết hạn<br/>
+    Trial end: <span class="mono">${trialEnd}</span><br/><br/>
+    Vui lòng mua <b>Plan ${PAID_DAYS} ngày</b> để mở lại.
+  </div>
+  <div style="margin-top:14px;">
+    <a class="btn" href="/pricing">Pay (Stripe)</a>
+    <a class="btn" href="/login">Login</a>
+  </div>
+</div>
+</body>
+</html>`;
 }
 
 /* =========================

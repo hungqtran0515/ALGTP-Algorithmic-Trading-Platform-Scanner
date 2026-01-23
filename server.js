@@ -1,13 +1,18 @@
+// server.js
 try { require("dotenv").config(); } catch (_) {}
 
 const express = require("express");
-const { clerkMiddleware } = require("@clerk/express");
+const { clerkMiddleware, requireAuth, getAuth } = require("@clerk/express");
 
 const app = express();
 app.use(express.json());
 
+// Nếu chạy sau proxy (Render) và dùng Secure cookie:
+// app.set("trust proxy", 1);
+
 const PORT = Number(process.env.PORT || 3000);
 
+// ENV
 const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
 const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
 
@@ -18,10 +23,9 @@ if (!CLERK_SECRET_KEY) {
   app.use(clerkMiddleware());
 }
 
-
-// -------- Pages --------
+// ---------------- HTML ----------------
 function renderLoginPageClerk() {
-  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Clerk not configured</h2>";
+  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Missing CLERK_PUBLISHABLE_KEY</h2>";
 
   return `<!doctype html>
 <html>
@@ -38,15 +42,16 @@ function renderLoginPageClerk() {
   <style>
     :root{color-scheme:dark}
     body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;
+      border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
     .muted{opacity:.8;font-size:12px;margin-top:10px;text-align:center}
   </style>
 </head>
 <body>
   <div class="box">
-    <h2 style="text-align:center;margin:0 0 14px;">🔐 Login with Clerk</h2>
+    <h2 style="text-align:center;margin:0 0 14px;">🔐 Login</h2>
     <div id="clerk-signin"></div>
-    <div class="muted">After sign-in you will be redirected to /ui</div>
+    <div class="muted">After login → /ui</div>
   </div>
 
   <script>
@@ -66,60 +71,58 @@ function renderUI(userId) {
   return `<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ALGTP UI</title>
-  <style>
-    :root{color-scheme:dark}
-    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24px}
-    a{color:#9ad}
-    .box{max-width:780px;margin:8vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.8}
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP UI</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24px}
+.box{max-width:800px;margin:8vh auto;padding:20px;border-radius:14px;
+  border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+a{color:#9ad}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.8}
+</style>
 </head>
 <body>
-  <div class="box">
-    <h2>✅ Private UI (Clerk)</h2>
-    <div class="mono">userId: ${userId || "-"}</div>
-    <p>Chỗ này bạn thay UI thật vào.</p>
+<div class="box">
+  <h2>✅ Private UI</h2>
+  <div class="mono">userId: ${userId}</div>
 
-    <p>
-      <a href="/logout">Logout</a>
-    </p>
-  </div>
+  <p>Đây là trang riêng, chỉ login mới vào được.</p>
+
+  <p>
+    <a href="/logout">Logout</a>
+  </p>
+</div>
 </body>
 </html>`;
 }
 
-// -------- Routes --------
+// ---------------- ROUTES ----------------
+
+// Home → UI
 app.get("/", (req, res) => res.redirect(302, "/ui"));
 
+// Health
 app.get("/health", (req, res) => {
-  res.json({ ok: true, message: "Server running ✅", login: "/login", ui: "/ui" });
+  res.json({ ok: true, login: "/login", ui: "/ui" });
 });
 
+// Login page
 app.get("/login", (req, res) => {
   res.type("html").send(renderLoginPageClerk());
 });
 
-// Guard bằng Clerk (chỉ cần login)
+// Private UI (Clerk guard)
 app.get("/ui", requireAuth(), (req, res) => {
   const { userId } = getAuth(req);
   res.type("html").send(renderUI(userId));
 });
 
-// Logout: redirect sang Clerk sign-out (client-side) thường làm từ frontend.
-// Nếu muốn server-route logout đơn giản, cho user quay về login:
+// Logout (redirect về login)
 app.get("/logout", (req, res) => {
-  // Với Clerk, sign out chuẩn là gọi Clerk.signOut() ở client.
-  // Ở server ta chỉ redirect user về /login:
   res.redirect(302, "/login");
 });
-
-app.listen(PORT, () => {
-  console.log(`✅ Server running http://localhost:${PORT}`);
-});
-
 
 
 // ---------------- ENV ----------------
@@ -1494,8 +1497,10 @@ app.get("/list", async (req, res) => {
   }
 });
 
+// ---------------- START ----------------
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
-  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
-  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
+  console.log(`✅ Server running: http://localhost:${PORT}`);
+  console.log(`🔐 Login: http://localhost:${PORT}/login`);
+  console.log(`🖥 UI: http://localhost:${PORT}/ui`);
 });
+

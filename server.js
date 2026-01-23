@@ -524,9 +524,11 @@ app.get("/scan", (req, res) => {
 const PORT = Number(process.env.PORT || 3000);
 
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ running on port ${PORT}`);
-  console.log(`➡️ UI: /ui`);
+  const base = STATIC_PUBLIC_BASE || `http://localhost:${PORT}`;
+  console.log(`✅ ALGTP™ Scanner running ${base}`);
+  console.log(`🚀 UI: ${base}/ui`);
+  console.log(`🔐 Login: ${base}/login`);
+  console.log(`📩 SMS status callback: ${base}/sms-status`);
 });
-
 
 

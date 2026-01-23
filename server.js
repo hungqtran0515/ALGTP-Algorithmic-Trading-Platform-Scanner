@@ -1,4 +1,3 @@
-// server.js
 try { require("dotenv").config(); } catch (_) {}
 
 const express = require("express");
@@ -8,27 +7,235 @@ const { clerkMiddleware, requireAuth, getAuth } = require("@clerk/express");
 const app = express();
 app.use(express.json());
 
-// Nếu chạy sau proxy (Render/Fly/NGINX) và dùng Secure cookie:
-// app.set("trust proxy", 1);
-
+// ================= PORT =================
 const PORT = Number(process.env.PORT || 3000);
 
-// ===================== CLERK ENV =====================
+// ================= CLERK =================
 const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
 const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
-
-// bật/tắt auth theo env
 const CLERK_ENABLED = Boolean(CLERK_SECRET_KEY);
 
 if (CLERK_ENABLED) {
-  console.log("✅ Clerk enabled");
   app.use(clerkMiddleware());
+  console.log("✅ Clerk enabled");
 } else {
-  console.log("⚠️ Clerk disabled (Missing CLERK_SECRET_KEY). /ui will be public.");
+  console.log("⚠️ Clerk disabled (no CLERK_SECRET_KEY)");
 }
 
-// helper middleware: nếu Clerk enabled thì yêu cầu login, còn không thì bỏ qua
 const maybeRequireAuth = CLERK_ENABLED ? requireAuth() : (req, res, next) => next();
+
+// ================= MASSIVE ENV =================
+const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
+const MASSIVE_MOVER_URL = String(
+  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
+).trim();
+const MASSIVE_TICKER_SNAPSHOT_URL = String(
+  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
+).trim();
+const MASSIVE_AGGS_URL = String(
+  process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker"
+).trim();
+
+function envMissing() {
+  const miss = [];
+  if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
+  if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
+  if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
+  if (!MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
+  return miss;
+}
+
+// ================= HELPERS =================
+function auth(params = {}, headers = {}) {
+  params.apiKey = MASSIVE_API_KEY;
+  return { params, headers };
+}
+
+function parseSymbols(input) {
+  return String(input || "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function n(x) {
+  const v = Number(x);
+  return Number.isFinite(v) ? v : null;
+}
+
+function round2(x) {
+  const v = n(x);
+  return v === null ? null : Number(v.toFixed(2));
+}
+
+// ================= AXIOS SAFE =================
+async function safeGet(url, { params, headers }) {
+  try {
+    const r = await axios.get(url, {
+      params,
+      headers,
+      timeout: 20000,
+      validateStatus: () => true,
+    });
+    return { ok: r.status < 400, status: r.status, data: r.data, url };
+  } catch (e) {
+    return { ok: false, status: null, data: null, url, error: String(e.message || e) };
+  }
+}
+
+// ================= MASSIVE CALLS =================
+async function fetchMovers(direction = "gainers") {
+  const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
+  const url = `${base}/${direction}`;
+  const params = {};
+  const headers = {};
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+
+  const rows = Array.isArray(r.data?.tickers)
+    ? r.data.tickers
+    : Array.isArray(r.data?.results)
+    ? r.data.results
+    : [];
+
+  return { ok: r.ok, rows };
+}
+
+async function fetchTickerSnapshot(ticker) {
+  const base = MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "");
+  const url = `${base}/${encodeURIComponent(ticker)}`;
+
+  const params = {};
+  const headers = {};
+  const a = auth(params, headers);
+
+  return await safeGet(url, { params: a.params, headers: a.headers });
+}
+
+// ================= NORMALIZE =================
+function normalizeSnapshot(ticker, snap) {
+  const root = snap?.results ?? snap ?? {};
+  const price = n(root?.price ?? root?.last ?? root?.c);
+  const prev = n(root?.prevClose ?? root?.pc);
+  const open = n(root?.open ?? root?.o);
+  const volume = n(root?.volume ?? root?.v);
+
+  const pricePct = price !== null && prev ? ((price - prev) / prev) * 100 : null;
+  const gapPct = open !== null && prev ? ((open - prev) / prev) * 100 : null;
+
+  return {
+    symbol: ticker,
+    price: round2(price),
+    pricePct: round2(pricePct),
+    gapPct: round2(gapPct),
+    volume: volume ? Math.round(volume) : null,
+  };
+}
+
+// ================= HTML =================
+function renderLoginPage() {
+  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Missing CLERK_PUBLISHABLE_KEY</h2>";
+
+  return `<!doctype html>
+<html>
+<head>
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
+    src="https://js.clerk.com/v4/clerk.browser.js"></script>
+</head>
+<body>
+<h2>Login</h2>
+<div id="clerk"></div>
+<script>
+window.addEventListener("load", async () => {
+  await Clerk.load();
+  Clerk.mountSignIn(document.getElementById("clerk"), {
+    afterSignInUrl: "/ui",
+    afterSignUpUrl: "/ui"
+  });
+});
+</script>
+</body>
+</html>`;
+}
+
+function renderUI(userId) {
+  return `<!doctype html>
+<html>
+<body style="background:#111;color:white;font-family:sans-serif">
+<h2>ALGTP Scanner</h2>
+<p>User: ${userId || "DEV MODE"}</p>
+<button onclick="run()">Scan NVDA,TSLA,AAPL</button>
+<pre id="out"></pre>
+<script>
+async function run(){
+  const r = await fetch("/scan?symbols=NVDA,TSLA,AAPL");
+  const j = await r.json();
+  document.getElementById("out").textContent = JSON.stringify(j,null,2);
+}
+</script>
+</body>
+</html>`;
+}
+
+// ================= ROUTES =================
+app.get("/", (req, res) => res.redirect("/ui"));
+
+app.get("/login", (req, res) => {
+  if (!CLERK_ENABLED) return res.redirect("/ui");
+  res.type("html").send(renderLoginPage());
+});
+
+app.get("/ui", maybeRequireAuth, (req, res) => {
+  const authInfo = CLERK_ENABLED ? getAuth(req) : {};
+  res.type("html").send(renderUI(authInfo.userId));
+});
+
+// ================= API =================
+app.get("/scan", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, miss });
+
+    const symbols = parseSymbols(req.query.symbols || "NVDA,TSLA,AAPL");
+
+    const snaps = await Promise.all(
+      symbols.map(async (t) => {
+        const r = await fetchTickerSnapshot(t);
+        return r.ok ? normalizeSnapshot(t, r.data) : null;
+      })
+    );
+
+    res.json({ ok: true, results: snaps.filter(Boolean) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.get("/list", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, miss });
+
+    const movers = await fetchMovers("gainers");
+    const tickers = movers.rows.slice(0, 20).map((x) => x.ticker);
+
+    const snaps = await Promise.all(
+      tickers.map(async (t) => {
+        const r = await fetchTickerSnapshot(t);
+        return r.ok ? normalizeSnapshot(t, r.data) : null;
+      })
+    );
+
+    res.json({ ok: true, results: snaps.filter(Boolean) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+
+
 
 // ===================== MASSIVE ENV =====================
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();

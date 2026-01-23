@@ -5,7 +5,6 @@
    - Paid: 30 days via Stripe webhook
    - Block ALL: /ui* /list /scan when expired
 ========================= */
-console.log("NODE VERSION =", process.version);
 
 require("dotenv").config();
 

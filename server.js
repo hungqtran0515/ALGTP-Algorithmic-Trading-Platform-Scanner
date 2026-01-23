@@ -119,16 +119,75 @@ function normalizePhone(input) {
   return null;
 }
 // =========================
-// PAYWALL RENDER (SAFE)
+// HTML HELPERS (LOGIN + PAYWALL)
 // =========================
 
-// fallback formatter
 function fmtDate(ms) {
   try {
     return new Date(ms).toLocaleString("en-US");
   } catch {
     return "-";
   }
+}
+
+function renderLoginPage(msg = "") {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP Login</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:560px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:10px;padding:12px;font-size:14px}
+    button{cursor:pointer;margin-top:10px}
+    .err{margin-top:10px;color:#ffb4b4}
+    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
+    <div class="mono">Format: 12199868683 / 2199868683 / +12199868683</div>
+    ${msg ? `<div class="err">${msg}</div>` : ""}
+
+    <input id="phone" placeholder="Phone" />
+    <button onclick="startOtp()">Send OTP</button>
+
+    <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
+    <button onclick="verifyOtp()">Verify</button>
+  </div>
+
+  <script>
+    async function startOtp(){
+      const phone = document.getElementById("phone").value.trim();
+      const r = await fetch("/auth/start", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ phone })
+      });
+      const d = await r.json();
+      if(!d.ok) alert("Error: " + (d.error||"failed"));
+      else alert("OTP sent");
+    }
+
+    async function verifyOtp(){
+      const phone = document.getElementById("phone").value.trim();
+      const otp = document.getElementById("otp").value.trim();
+      const r = await fetch("/auth/verify", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ phone, otp })
+      });
+      const d = await r.json();
+      if(!d.ok) alert("Error: " + (d.error||"failed"));
+      else location.href="/ui";
+    }
+  </script>
+</body>
+</html>`;
 }
 
 function renderPaywallPage(access) {
@@ -139,36 +198,37 @@ function renderPaywallPage(access) {
   return `<!doctype html>
 <html>
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP Access</title>
-<style>
-:root{color-scheme:dark}
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-a{text-decoration:none}
-.btn{background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;margin-right:10px;display:inline-block}
-.btn:hover{border-color:rgba(255,255,255,.28)}
-.muted{opacity:.85;line-height:1.7}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP Access</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    a{text-decoration:none}
+    .btn{background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;margin-right:10px;display:inline-block}
+    .btn:hover{border-color:rgba(255,255,255,.28)}
+    .muted{opacity:.85;line-height:1.7}
+    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+  </style>
 </head>
 <body>
-<div class="box">
-  <h2>⛔ Trial expired / Access blocked</h2>
-  <div class="muted">
-    Trial <b>${TRIAL_DAYS} ngày</b> đã hết hạn<br/>
-    Trial end: <span class="mono">${trialEnd}</span><br/><br/>
-    Vui lòng mua <b>Plan ${PAID_DAYS} ngày</b> để mở lại.
+  <div class="box">
+    <h2 style="margin:0 0 8px;">⛔ Trial expired / Access blocked</h2>
+    <div class="muted">
+      Trial <b>${TRIAL_DAYS} ngày</b> đã hết hạn<br/>
+      Trial end: <span class="mono">${trialEnd}</span><br/><br/>
+      Vui lòng mua <b>Plan ${PAID_DAYS} ngày</b> để mở lại.
+    </div>
+    <div style="margin-top:14px;">
+      <a class="btn" href="/pricing">Pay (Stripe)</a>
+      <a class="btn" href="/login">Login</a>
+    </div>
   </div>
-  <div style="margin-top:14px;">
-    <a class="btn" href="/pricing">Pay (Stripe)</a>
-    <a class="btn" href="/login">Login</a>
-  </div>
-</div>
 </body>
 </html>`;
 }
+
 
 /* =========================
    ✅ TIMING STORE: TRIAL 14D + PAID 30D (users.json)

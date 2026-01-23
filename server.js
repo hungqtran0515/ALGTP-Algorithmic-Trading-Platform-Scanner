@@ -1,3 +1,4 @@
+// server.js
 try { require("dotenv").config(); } catch (_) {}
 
 const express = require("express");
@@ -10,7 +11,7 @@ app.use(express.json());
 // ================= PORT =================
 const PORT = Number(process.env.PORT || 3000);
 
-// ================= CLERK =================
+// ================= CLERK (optional) =================
 const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
 const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
 const CLERK_ENABLED = Boolean(CLERK_SECRET_KEY);
@@ -21,227 +22,16 @@ if (CLERK_ENABLED) {
 } else {
   console.log("⚠️ Clerk disabled (no CLERK_SECRET_KEY)");
 }
-
 const maybeRequireAuth = CLERK_ENABLED ? requireAuth() : (req, res, next) => next();
 
-// ================= MASSIVE ENV =================
+// ===================== MASSIVE ENV (ONE BLOCK ONLY) =====================
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
-const MASSIVE_MOVER_URL = String(
-  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
-).trim();
-const MASSIVE_TICKER_SNAPSHOT_URL = String(
-  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
-).trim();
-const MASSIVE_AGGS_URL = String(
-  process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker"
-).trim();
 
-function envMissing() {
-  const miss = [];
-  if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
-  if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
-  if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
-  if (!MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
-  return miss;
-}
-
-// ================= HELPERS =================
-function auth(params = {}, headers = {}) {
-  params.apiKey = MASSIVE_API_KEY;
-  return { params, headers };
-}
-
-function parseSymbols(input) {
-  return String(input || "")
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
-}
-
-function n(x) {
-  const v = Number(x);
-  return Number.isFinite(v) ? v : null;
-}
-
-function round2(x) {
-  const v = n(x);
-  return v === null ? null : Number(v.toFixed(2));
-}
-
-// ================= AXIOS SAFE =================
-async function safeGet(url, { params, headers }) {
-  try {
-    const r = await axios.get(url, {
-      params,
-      headers,
-      timeout: 20000,
-      validateStatus: () => true,
-    });
-    return { ok: r.status < 400, status: r.status, data: r.data, url };
-  } catch (e) {
-    return { ok: false, status: null, data: null, url, error: String(e.message || e) };
-  }
-}
-
-// ================= MASSIVE CALLS =================
-async function fetchMovers(direction = "gainers") {
-  const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
-  const url = `${base}/${direction}`;
-  const params = {};
-  const headers = {};
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-
-  const rows = Array.isArray(r.data?.tickers)
-    ? r.data.tickers
-    : Array.isArray(r.data?.results)
-    ? r.data.results
-    : [];
-
-  return { ok: r.ok, rows };
-}
-
-async function fetchTickerSnapshot(ticker) {
-  const base = MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "");
-  const url = `${base}/${encodeURIComponent(ticker)}`;
-
-  const params = {};
-  const headers = {};
-  const a = auth(params, headers);
-
-  return await safeGet(url, { params: a.params, headers: a.headers });
-}
-
-// ================= NORMALIZE =================
-function normalizeSnapshot(ticker, snap) {
-  const root = snap?.results ?? snap ?? {};
-  const price = n(root?.price ?? root?.last ?? root?.c);
-  const prev = n(root?.prevClose ?? root?.pc);
-  const open = n(root?.open ?? root?.o);
-  const volume = n(root?.volume ?? root?.v);
-
-  const pricePct = price !== null && prev ? ((price - prev) / prev) * 100 : null;
-  const gapPct = open !== null && prev ? ((open - prev) / prev) * 100 : null;
-
-  return {
-    symbol: ticker,
-    price: round2(price),
-    pricePct: round2(pricePct),
-    gapPct: round2(gapPct),
-    volume: volume ? Math.round(volume) : null,
-  };
-}
-
-// ================= HTML =================
-function renderLoginPage() {
-  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Missing CLERK_PUBLISHABLE_KEY</h2>";
-
-  return `<!doctype html>
-<html>
-<head>
-  <script async crossorigin="anonymous"
-    data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
-    src="https://js.clerk.com/v4/clerk.browser.js"></script>
-</head>
-<body>
-<h2>Login</h2>
-<div id="clerk"></div>
-<script>
-window.addEventListener("load", async () => {
-  await Clerk.load();
-  Clerk.mountSignIn(document.getElementById("clerk"), {
-    afterSignInUrl: "/ui",
-    afterSignUpUrl: "/ui"
-  });
-});
-</script>
-</body>
-</html>`;
-}
-
-function renderUI(userId) {
-  return `<!doctype html>
-<html>
-<body style="background:#111;color:white;font-family:sans-serif">
-<h2>ALGTP Scanner</h2>
-<p>User: ${userId || "DEV MODE"}</p>
-<button onclick="run()">Scan NVDA,TSLA,AAPL</button>
-<pre id="out"></pre>
-<script>
-async function run(){
-  const r = await fetch("/scan?symbols=NVDA,TSLA,AAPL");
-  const j = await r.json();
-  document.getElementById("out").textContent = JSON.stringify(j,null,2);
-}
-</script>
-</body>
-</html>`;
-}
-
-// ================= ROUTES =================
-app.get("/", (req, res) => res.redirect("/ui"));
-
-app.get("/login", (req, res) => {
-  if (!CLERK_ENABLED) return res.redirect("/ui");
-  res.type("html").send(renderLoginPage());
-});
-
-app.get("/ui", maybeRequireAuth, (req, res) => {
-  const authInfo = CLERK_ENABLED ? getAuth(req) : {};
-  res.type("html").send(renderUI(authInfo.userId));
-});
-
-// ================= API =================
-app.get("/scan", async (req, res) => {
-  try {
-    const miss = envMissing();
-    if (miss.length) return res.status(400).json({ ok: false, miss });
-
-    const symbols = parseSymbols(req.query.symbols || "NVDA,TSLA,AAPL");
-
-    const snaps = await Promise.all(
-      symbols.map(async (t) => {
-        const r = await fetchTickerSnapshot(t);
-        return r.ok ? normalizeSnapshot(t, r.data) : null;
-      })
-    );
-
-    res.json({ ok: true, results: snaps.filter(Boolean) });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
-
-app.get("/list", async (req, res) => {
-  try {
-    const miss = envMissing();
-    if (miss.length) return res.status(400).json({ ok: false, miss });
-
-    const movers = await fetchMovers("gainers");
-    const tickers = movers.rows.slice(0, 20).map((x) => x.ticker);
-
-    const snaps = await Promise.all(
-      tickers.map(async (t) => {
-        const r = await fetchTickerSnapshot(t);
-        return r.ok ? normalizeSnapshot(t, r.data) : null;
-      })
-    );
-
-    res.json({ ok: true, results: snaps.filter(Boolean) });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
-
-
-
-
-// ===================== MASSIVE ENV =====================
-const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
-const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
+// auth mode
+const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim(); // query | xapi | bearer
 const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
 
+// endpoints
 const MASSIVE_MOVER_URL = String(
   process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
 ).trim();
@@ -250,25 +40,28 @@ const MASSIVE_TICKER_SNAPSHOT_URL = String(
   process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
-// ✅ must be declared BEFORE envMissing()
 const MASSIVE_AGGS_URL = String(
   process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker"
 ).trim();
 
+// toggles
 const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
-const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
-const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
+const SNAP_CONCURRENCY = clamp(Number(process.env.SNAP_CONCURRENCY || 4), 1, 10);
+const DEBUG = String(process.env.DEBUG || "false").toLowerCase() === "true";
 
-// NOTICE(ADD): indicators toggle + bars limit
 const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
-function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
 
-// NOTICE(ADD): VWAP alert thresholds (volume spike)
 const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
 const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
 
-// ===================== helpers =====================
+// ===================== Helpers =====================
+function clamp(x, a, b) {
+  const v = Number(x);
+  if (!Number.isFinite(v)) return a;
+  return Math.max(a, Math.min(b, v));
+}
+
 function envMissing() {
   const miss = [];
   if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
@@ -279,7 +72,7 @@ function envMissing() {
 }
 
 function auth(params = {}, headers = {}) {
-  const t = String(MASSIVE_AUTH_TYPE).toLowerCase();
+  const t = String(MASSIVE_AUTH_TYPE || "query").toLowerCase();
 
   if (t === "query") params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
   else if (t === "xapi") headers["x-api-key"] = MASSIVE_API_KEY;
@@ -288,7 +81,7 @@ function auth(params = {}, headers = {}) {
 
   headers["user-agent"] =
     headers["user-agent"] ||
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari";
 
   return { params, headers };
 }
@@ -308,6 +101,14 @@ function n(x) {
 function round2(x) {
   const v = n(x);
   return v === null ? null : Number(v.toFixed(2));
+}
+
+function ymd(d) {
+  const x = new Date(d);
+  const yyyy = x.getFullYear();
+  const mm = String(x.getMonth() + 1).padStart(2, "0");
+  const dd = String(x.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 async function mapPool(items, concurrency, fn) {
@@ -327,10 +128,9 @@ async function mapPool(items, concurrency, fn) {
   return out;
 }
 
-// ---------------- axios safe ----------------
+// ================= AXIOS SAFE =================
 function axiosFail(e) {
   if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
-
   const code = e.code || null;
   const msg = e.message || "axios error";
   const url = e.config?.url || null;
@@ -357,7 +157,7 @@ async function safeGet(url, { params, headers }) {
   }
 }
 
-// ===================== Massive calls =====================
+// ================= MASSIVE CALLS =================
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
   const directionSafe = d === "losers" ? "losers" : "gainers";
@@ -368,8 +168,8 @@ async function fetchMovers(direction = "gainers") {
   const params = {};
   const headers = {};
   if (INCLUDE_OTC) params["include_otc"] = "true";
-  const a = auth(params, headers);
 
+  const a = auth(params, headers);
   const r = await safeGet(url, { params: a.params, headers: a.headers });
 
   const rows = Array.isArray(r.data?.tickers)
@@ -378,7 +178,7 @@ async function fetchMovers(direction = "gainers") {
     ? r.data.results
     : Array.isArray(r.data?.data)
     ? r.data.data
-    : null;
+    : [];
 
   return {
     ok: r.ok && Array.isArray(rows),
@@ -402,235 +202,54 @@ async function fetchTickerSnapshot(ticker) {
   return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
 }
 
-// ===================== auto-detect fields =====================
-function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
-  if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
+// ===================== Aggs 5m + indicators =====================
+const aggsCache = new Map(); // key: "TICKER|5m" -> { ts, bars }
 
-  const wanted = new Set(candidateKeys.map((k) => String(k).toLowerCase()));
-  const q = [{ v: obj, path: "root" }];
-  let visited = 0;
+async function fetchAggs5m(ticker) {
+  const sym = String(ticker || "").trim().toUpperCase();
+  const cacheKey = `${sym}|5m`;
+  const now = Date.now();
 
-  while (q.length && visited < maxNodes) {
-    const { v, path } = q.shift();
-    visited++;
+  const hit = aggsCache.get(cacheKey);
+  if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
 
-    if (!v || typeof v !== "object") continue;
+  const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
+  const to = ymd(new Date());
+  const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
 
-    if (Array.isArray(v)) {
-      for (let i = 0; i < v.length; i++) {
-        const item = v[i];
-        if (item && typeof item === "object") q.push({ v: item, path: `${path}[${i}]` });
-      }
-      continue;
-    }
+  const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
 
-    for (const k of Object.keys(v)) {
-      const keyLower = String(k).toLowerCase();
-      const val = v[k];
+  const params = { adjusted: "true", sort: "desc", limit: String(AGGS_5M_LIMIT) };
+  const headers = {};
+  const a = auth(params, headers);
 
-      if (wanted.has(keyLower)) {
-        const num = n(val);
-        if (num !== null) return { value: num, path: `${path}.${k}`, keyMatched: k };
-      }
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+  const bars = Array.isArray(r.data?.results) ? r.data.results : [];
+  const ok = r.ok && bars.length > 0;
 
-      if (val && typeof val === "object") q.push({ v: val, path: `${path}.${k}` });
-    }
-  }
+  if (ok) aggsCache.set(cacheKey, { ts: now, bars });
 
-  return { value: null, path: null, keyMatched: null };
+  return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
 }
 
-function capCategory(marketCap) {
-  const mc = n(marketCap);
-  if (mc === null) return null;
-  if (mc < 2_000_000_000) return "small";
-  if (mc < 10_000_000_000) return "mid";
-  return "big";
-}
-
-function floatCategory(floatShares) {
-  const fs = n(floatShares);
-  if (fs === null) return null;
-  if (fs < 10_000_000) return "nano";
-  if (fs < 20_000_000) return "low";
-  if (fs < 50_000_000) return "mid";
-  return "high";
-}
-
-function normalizeSnapshotAuto(ticker, snap) {
-  const root = snap?.results ?? snap ?? {};
-  const day = root?.day ?? root?.todays ?? root?.today ?? null;
-  const prev = root?.prevDay ?? root?.previousDay ?? root?.prev ?? null;
-
-  const lastTradePrice =
-    n(root?.lastTrade?.p) ??
-    n(root?.lastTrade?.price) ??
-    n(root?.last?.p) ??
-    n(root?.last) ??
-    n(root?.price) ??
-    null;
-
-  const dayClose = n(day?.c ?? day?.close ?? root?.close ?? root?.dayClose) ?? null;
-  const prevClose = n(prev?.c ?? prev?.close ?? root?.prevClose ?? root?.previousClose) ?? null;
-
-  let price = lastTradePrice ?? dayClose ?? null;
-  let open = n(day?.o ?? day?.open ?? root?.open) ?? null;
-  let volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
-
-  let pricePct =
-    n(root?.todaysChangePerc) ??
-    n(root?.todaysChangePercent) ??
-    n(root?.changePerc) ??
-    n(root?.changePercent) ??
-    null;
-
-  if (price === null) {
-    const fp = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]);
-    price = fp.value;
-  }
-  if (open === null) {
-    const fo = findFirstNumberByKeys(root, ["open", "o"]);
-    open = fo.value;
-  }
-
-  let prevC = prevClose;
-  if (prevC === null) {
-    const fpc = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]);
-    prevC = fpc.value;
-  }
-
-  if (volume === null) {
-    const fv = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]);
-    volume = fv.value;
-  }
-
-  if (pricePct === null) {
-    const fchg = findFirstNumberByKeys(root, [
-      "todayschangeperc",
-      "todayschangepercent",
-      "changepct",
-      "changepercent",
-      "pctchange",
-      "percentchange",
-    ]);
-    pricePct = fchg.value;
-  }
-
-  if (pricePct === null && price !== null && prevC !== null && prevC > 0) {
-    pricePct = ((price - prevC) / prevC) * 100;
-  }
-
-  const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
-
-  // Float
-  let floatShares =
-    n(root?.float) ??
-    n(root?.freeFloat) ??
-    n(root?.sharesFloat) ??
-    n(root?.floatShares) ??
-    null;
-
-  if (floatShares === null) {
-    const ff = findFirstNumberByKeys(root, [
-      "float",
-      "freefloat",
-      "free_float",
-      "sharesfloat",
-      "floatshares",
-      "publicfloat",
-      "public_float",
-    ]);
-    floatShares = ff.value;
-  }
-
-  // Market cap
-  let marketCap =
-    n(root?.marketCap) ??
-    n(root?.marketcap) ??
-    n(root?.mktcap) ??
-    n(root?.market_cap) ??
-    n(root?.marketCapitalization) ??
-    null;
-
-  if (marketCap === null) {
-    const mc = findFirstNumberByKeys(root, [
-      "marketcap",
-      "marketCap",
-      "mktcap",
-      "market_cap",
-      "marketcapitalization",
-      "marketCapitalization",
-      "cap",
-      "capitalization",
-    ]);
-    marketCap = mc.value;
-  }
-
-  return {
-    symbol: String(ticker || "").trim().toUpperCase(),
-    price: price !== null ? round2(price) : null,
-    pricePct: pricePct !== null ? round2(pricePct) : null,
-    gapPct: gapPct !== null ? round2(gapPct) : null,
-    volume: volume !== null ? Math.round(volume) : null,
-
-    floatShares: floatShares !== null ? Math.round(floatShares) : null,
-    floatM: floatShares !== null ? round2(floatShares / 1_000_000) : null,
-    floatCat: floatCategory(floatShares),
-
-    marketCap: marketCap !== null ? Math.round(marketCap) : null,
-    marketCapB: marketCap !== null ? round2(marketCap / 1_000_000_000) : null,
-    cap: capCategory(marketCap),
-  };
-}
-
-// ===================== scoring =====================
-function demandScore(row) {
-  const gap = Math.abs(n(row?.gapPct) ?? 0);
-  const pc = Math.abs(n(row?.pricePct) ?? 0);
-
-  let s = 0;
-  if (gap >= 20) s += 1;
-  if (gap >= 40) s += 1;
-  if (gap >= 60) s += 1;
-  if (pc >= 10) s += 1;
-  if (pc >= 20) s += 1;
-
-  return clamp(s, 0, 5);
-}
-
-function signalIcon(d) {
-  if (d >= 5) return "🚀";
-  if (d >= 4) return "🔥";
-  if (d >= 3) return "👀";
-  return "⛔️";
-}
-
-function paSignalIcon(row) {
-  const above = Boolean(row?.aboveVWAP_5m);
-  const volSpike = Boolean(row?.volSpike_5m);
-  if (above && volSpike) return "🚨";
-  if (above) return "✅";
-  if (volSpike) return "🔊";
-  return "";
-}
-
-// ===================== 5m indicators =====================
-function computeSMA(closes, len) {
-  if (!Array.isArray(closes) || closes.length < len) return null;
+function computeSMA(values, len) {
+  if (!Array.isArray(values) || values.length < len) return null;
   let sum = 0;
-  for (let i = 0; i < len; i++) sum += closes[i];
+  for (let i = values.length - len; i < values.length; i++) sum += values[i];
   return sum / len;
 }
 
-function computeEMA(closes, len) {
-  if (!Array.isArray(closes) || closes.length < len) return null;
+function computeEMA(values, len) {
+  if (!Array.isArray(values) || values.length < len) return null;
   const k = 2 / (len + 1);
-  const seed = computeSMA(closes.slice(0, len), len);
-  if (seed === null) return null;
 
-  let ema = seed;
-  for (let i = len; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
+  // seed SMA of first len (chronological)
+  const seedArr = values.slice(0, len);
+  if (seedArr.length < len) return null;
+  let ema = seedArr.reduce((a, b) => a + b, 0) / len;
+
+  for (let i = len; i < values.length; i++) {
+    ema = values[i] * k + ema * (1 - k);
   }
   return ema;
 }
@@ -678,12 +297,12 @@ function indicatorsFromAggs5m(barsDesc) {
     };
   }
 
+  // barsDesc is usually DESC from API (sort=desc). We'll normalize then reverse to chrono.
   const bars = barsDesc
     .map((b) => ({
       c: n(b?.c ?? b?.close),
       v: n(b?.v ?? b?.volume),
       vw: n(b?.vw),
-      t: n(b?.t) ?? null,
     }))
     .filter((x) => x.c !== null)
     .slice(0, 400);
@@ -692,15 +311,12 @@ function indicatorsFromAggs5m(barsDesc) {
   const closes = barsChrono.map((x) => x.c);
   const vols = barsChrono.map((x) => x.v ?? 0);
 
-  const last26 = closes.slice(-26);
-  const sma26 = last26.length === 26 ? computeSMA(last26, 26) : null;
-
+  const sma26 = computeSMA(closes, 26);
   const ema9 = computeEMA(closes, 9);
   const ema34 = computeEMA(closes, 34);
   const vwap = computeVWAP(closes, vols);
 
   const lastBar = barsChrono[barsChrono.length - 1] || null;
-  const vwapBar = lastBar?.vw ?? null;
 
   const lastVol = lastBar?.v ?? null;
   const avgVol = computeAvg(vols.slice(-VOL_AVG_LEN_5M));
@@ -710,47 +326,10 @@ function indicatorsFromAggs5m(barsDesc) {
     ema9_5m: ema9 !== null ? round2(ema9) : null,
     ema34_5m: ema34 !== null ? round2(ema34) : null,
     vwap_5m: vwap !== null ? round2(vwap) : null,
-    vwapBar_5m: vwapBar !== null ? round2(vwapBar) : null,
+    vwapBar_5m: lastBar?.vw !== null && lastBar?.vw !== undefined ? round2(lastBar.vw) : null,
     lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
     avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
   };
-}
-
-const aggsCache = new Map(); // key: "TICKER|5m" -> { ts, bars }
-function ymd(d) {
-  const x = new Date(d);
-  const yyyy = x.getFullYear();
-  const mm = String(x.getMonth() + 1).padStart(2, "0");
-  const dd = String(x.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-async function fetchAggs5m(ticker) {
-  const sym = String(ticker || "").trim().toUpperCase();
-  const cacheKey = `${sym}|5m`;
-  const now = Date.now();
-
-  const hit = aggsCache.get(cacheKey);
-  if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
-
-  const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
-  const to = ymd(new Date());
-  const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
-
-  const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
-
-  const params = { adjusted: "true", sort: "desc", limit: String(AGGS_5M_LIMIT) };
-  const headers = {};
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-
-  const bars = Array.isArray(r.data?.results) ? r.data.results : [];
-  const ok = r.ok && bars.length > 0;
-
-  if (ok) aggsCache.set(cacheKey, { ts: now, bars });
-
-  return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
 }
 
 function attach5mSignals(row) {
@@ -765,32 +344,54 @@ function attach5mSignals(row) {
   return {
     aboveVWAP_5m: aboveVWAP,
     volSpike_5m: volSpike,
-    paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }),
+    paIcon: aboveVWAP && volSpike ? "🚨" : aboveVWAP ? "✅" : volSpike ? "🔊" : "",
   };
 }
 
-// ===================== group + sorting =====================
-function groupToDirection(group) {
-  if (group === "topLosers") return "losers";
-  return "gainers";
-}
+// ================= NORMALIZE SNAPSHOT =================
+function normalizeSnapshotAuto(ticker, snap) {
+  const root = snap?.results ?? snap ?? {};
+  const day = root?.day ?? root?.todays ?? root?.today ?? null;
+  const prev = root?.prevDay ?? root?.previousDay ?? root?.prev ?? null;
 
-function sortRowsByGroup(rows, group) {
-  if (group === "topGappers") {
-    rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
-    return;
+  const lastTradePrice =
+    n(root?.lastTrade?.p) ??
+    n(root?.lastTrade?.price) ??
+    n(root?.last?.p) ??
+    n(root?.last) ??
+    n(root?.price) ??
+    null;
+
+  const dayClose = n(day?.c ?? day?.close ?? root?.close ?? root?.dayClose) ?? null;
+  const prevClose = n(prev?.c ?? prev?.close ?? root?.prevClose ?? root?.previousClose) ?? null;
+
+  const price = lastTradePrice ?? dayClose ?? null;
+  const open = n(day?.o ?? day?.open ?? root?.open) ?? null;
+  const volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
+
+  let pricePct =
+    n(root?.todaysChangePerc) ??
+    n(root?.todaysChangePercent) ??
+    n(root?.changePerc) ??
+    n(root?.changePercent) ??
+    null;
+
+  if (pricePct === null && price !== null && prevClose !== null && prevClose > 0) {
+    pricePct = ((price - prevClose) / prevClose) * 100;
   }
-  rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+
+  const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : null;
+
+  return {
+    symbol: String(ticker || "").trim().toUpperCase(),
+    price: price !== null ? round2(price) : null,
+    pricePct: pricePct !== null ? round2(pricePct) : null,
+    gapPct: gapPct !== null ? round2(gapPct) : null,
+    volume: volume !== null ? Math.round(volume) : null,
+  };
 }
 
-function capPass(row, cap) {
-  const c = String(cap || "all").toLowerCase();
-  if (c === "all") return true;
-  if (!row.cap) return false;
-  return row.cap === c;
-}
-
-// ===================== HTML: Clerk Login =====================
+// ================= HTML UI =================
 function renderLoginPageClerk() {
   if (!CLERK_PUBLISHABLE_KEY) return "<h2>Missing CLERK_PUBLISHABLE_KEY</h2>";
 
@@ -800,12 +401,10 @@ function renderLoginPageClerk() {
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>ALGTP Login</title>
-
   <script async crossorigin="anonymous"
     data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
     src="https://js.clerk.com/v4/clerk.browser.js">
   </script>
-
   <style>
     :root{color-scheme:dark}
     body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
@@ -820,7 +419,6 @@ function renderLoginPageClerk() {
     <div id="clerk-signin"></div>
     <div class="muted">After login → /ui</div>
   </div>
-
   <script>
     window.addEventListener("load", async () => {
       await Clerk.load();
@@ -861,6 +459,145 @@ function renderLogoutPage() {
 </body>
 </html>`;
 }
+
+function renderUI(userId) {
+  return `<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+</head>
+<body style="background:#111;color:white;font-family:system-ui;margin:0;padding:18px">
+  <h2 style="margin:0 0 8px">ALGTP Scanner</h2>
+  <div style="opacity:.8;margin-bottom:12px">User: ${userId || "DEV MODE"}</div>
+
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+    <button onclick="scan('NVDA,TSLA,AAPL')">Scan NVDA,TSLA,AAPL</button>
+    <button onclick="list()">List Top Gainers</button>
+    <button onclick="location.href='/logout'">Logout</button>
+  </div>
+
+  <pre id="out" style="white-space:pre-wrap;background:#0b0d12;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.12)"></pre>
+
+<script>
+async function scan(symbols){
+  const r = await fetch("/scan?symbols="+encodeURIComponent(symbols));
+  const j = await r.json();
+  document.getElementById("out").textContent = JSON.stringify(j,null,2);
+}
+async function list(){
+  const r = await fetch("/list");
+  const j = await r.json();
+  document.getElementById("out").textContent = JSON.stringify(j,null,2);
+}
+</script>
+</body>
+</html>`;
+}
+
+// ================= ROUTES =================
+app.get("/", (req, res) => res.redirect("/ui"));
+
+app.get("/login", (req, res) => {
+  if (!CLERK_ENABLED) return res.redirect("/ui");
+  res.type("html").send(renderLoginPageClerk());
+});
+
+app.get("/logout", (req, res) => {
+  if (!CLERK_ENABLED) return res.redirect("/ui");
+  res.type("html").send(renderLogoutPage());
+});
+
+app.get("/ui", maybeRequireAuth, (req, res) => {
+  const authInfo = CLERK_ENABLED ? getAuth(req) : {};
+  res.type("html").send(renderUI(authInfo.userId));
+});
+
+// ================= API: scan custom symbols =================
+app.get("/scan", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, miss });
+
+    const symbols = parseSymbols(req.query.symbols || "NVDA,TSLA,AAPL");
+
+    const snaps = await mapPool(symbols, SNAP_CONCURRENCY, async (t) => {
+      const r = await fetchTickerSnapshot(t);
+      if (!r.ok) return null;
+
+      let row = normalizeSnapshotAuto(t, r.data);
+
+      if (ENABLE_5M_INDICATORS) {
+        const a = await fetchAggs5m(t);
+        if (a.ok) {
+          const ind = indicatorsFromAggs5m(a.bars);
+          row = { ...row, ...ind, ...attach5mSignals({ ...row, ...ind }) };
+        } else if (DEBUG) {
+          row = { ...row, aggs5mError: a.errorDetail || { status: a.status, url: a.url } };
+        }
+      }
+
+      return row;
+    });
+
+    res.json({ ok: true, results: snaps.filter(Boolean) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ================= API: list top movers =================
+app.get("/list", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, miss });
+
+    const direction = String(req.query.direction || "gainers").toLowerCase() === "losers" ? "losers" : "gainers";
+    const limit = clamp(Number(req.query.limit || 20), 1, 100);
+
+    const movers = await fetchMovers(direction);
+    if (!movers.ok) {
+      return res.status(502).json({
+        ok: false,
+        error: "fetchMovers failed",
+        status: movers.status,
+        sample: movers.sample,
+        errorDetail: movers.errorDetail,
+        url: movers.url,
+      });
+    }
+
+    const tickers = movers.rows.slice(0, limit).map((x) => x.ticker || x.symbol).filter(Boolean);
+
+    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+      const r = await fetchTickerSnapshot(t);
+      if (!r.ok) return null;
+
+      let row = normalizeSnapshotAuto(t, r.data);
+
+      if (ENABLE_5M_INDICATORS) {
+        const a = await fetchAggs5m(t);
+        if (a.ok) {
+          const ind = indicatorsFromAggs5m(a.bars);
+          row = { ...row, ...ind, ...attach5mSignals({ ...row, ...ind }) };
+        } else if (DEBUG) {
+          row = { ...row, aggs5mError: a.errorDetail || { status: a.status, url: a.url } };
+        }
+      }
+
+      return row;
+    });
+
+    res.json({ ok: true, direction, results: snaps.filter(Boolean) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ================= START =================
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
+
 
 // ===================== HTML: Scanner UI (Protected) =====================
 function renderScannerUI(preset = {}, authInfo = {}) {

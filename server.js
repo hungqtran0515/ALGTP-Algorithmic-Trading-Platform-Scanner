@@ -152,26 +152,73 @@ function renderLoginPage(msg = "") {
   <title>ALGTP Login</title>
   <style>
     :root{color-scheme:dark}
-    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-    .box{max-width:560px;margin:10vh auto;padding:22px;border-radius:16px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    body{
+      margin:0;
+      background:#0b0d12;
+      color:#e6e8ef;
+      font-family:system-ui,-apple-system,BlinkMacSystemFont;
+    }
+    .box{
+      max-width:560px;
+      margin:10vh auto;
+      padding:24px;
+      border-radius:18px;
+      border:1px solid rgba(255,255,255,.14);
+      background:rgba(18,24,43,.55);
+      box-shadow:0 20px 40px rgba(0,0,0,.45);
+    }
     .logo{
-      text-align:center;
-      font-weight:700;
-      font-size:18px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      margin-bottom:18px;
+    }
+    .logo-text{
+      font-size:22px;
+      font-weight:800;
       letter-spacing:.6px;
-      margin-bottom:14px;
+      background:linear-gradient(90deg,#4fd1ff,#8b7cff,#ff7ad9);
+      -webkit-background-clip:text;
+      -webkit-text-fill-color:transparent;
     }
-    .logo span{
-      display:block;
+    .logo-sub{
+      text-align:center;
       font-size:12px;
-      font-weight:500;
       opacity:.75;
-      margin-top:4px;
+      margin-top:2px;
+      letter-spacing:.4px;
     }
-    input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:10px;padding:12px;font-size:14px}
-    button{cursor:pointer;margin-top:10px}
-    .err{margin-top:10px;color:#ffb4b4}
-    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+    input,button{
+      width:100%;
+      box-sizing:border-box;
+      background:#121622;
+      border:1px solid rgba(255,255,255,.12);
+      color:#e6e8ef;
+      border-radius:12px;
+      padding:12px;
+      font-size:14px;
+    }
+    button{
+      cursor:pointer;
+      margin-top:10px;
+      font-weight:600;
+    }
+    button:hover{
+      border-color:rgba(255,255,255,.28);
+    }
+    .err{
+      margin-top:10px;
+      color:#ffb4b4;
+      font-size:13px;
+    }
+    .mono{
+      font-family:ui-monospace,Menlo,monospace;
+      font-size:12px;
+      opacity:.75;
+      text-align:center;
+      margin-bottom:8px;
+    }
   </style>
 </head>
 <body>
@@ -179,15 +226,24 @@ function renderLoginPage(msg = "") {
 
     <!-- LOGO -->
     <div class="logo">
-      ALGTP™
-      <span>Algorithmic Trading Platform Scanner</span>
+      <!-- Rocket SVG -->
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+        <path d="M14 3C9.5 3 6 7.5 6 12v2l-2 2 4-1 2 4 2-2h2c4.5 0 9-3.5 9-8S18.5 3 14 3z"
+          stroke="#8b7cff" stroke-width="1.4" fill="none"/>
+        <circle cx="14" cy="9" r="2" stroke="#4fd1ff" stroke-width="1.4"/>
+      </svg>
+
+      <div>
+        <div class="logo-text">ALGTP™</div>
+        <div class="logo-sub">Algorithmic Trading Platform Scanner</div>
+      </div>
     </div>
 
-    <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
-    <div class="mono">Format: 12199868683 / 2199868683 / +12199868683</div>
+    <h2 style="margin:0 0 10px;text-align:center;">🔐 Login (SMS OTP)</h2>
+    <div class="mono">Format: 12199868683 · 2199868683 · +12199868683</div>
     ${msg ? `<div class="err">${msg}</div>` : ""}
 
-    <input id="phone" placeholder="Phone" />
+    <input id="phone" placeholder="Phone number" />
     <button onclick="startOtp()">Send OTP</button>
 
     <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
@@ -196,33 +252,33 @@ function renderLoginPage(msg = "") {
 
   <script>
     async function startOtp(){
-      const phone = document.getElementById("phone").value.trim();
-      const r = await fetch("/auth/start", {
+      const phone=document.getElementById("phone").value.trim();
+      const r=await fetch("/auth/start",{
         method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ phone })
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({phone})
       });
-      const d = await r.json();
-      if(!d.ok) alert("Error: " + (d.error||"failed"));
+      const d=await r.json();
+      if(!d.ok) alert(d.error||"failed");
       else alert("OTP sent");
     }
-
     async function verifyOtp(){
-      const phone = document.getElementById("phone").value.trim();
-      const otp = document.getElementById("otp").value.trim();
-      const r = await fetch("/auth/verify", {
+      const phone=document.getElementById("phone").value.trim();
+      const otp=document.getElementById("otp").value.trim();
+      const r=await fetch("/auth/verify",{
         method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ phone, otp })
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({phone,otp})
       });
-      const d = await r.json();
-      if(!d.ok) alert("Error: " + (d.error||"failed"));
+      const d=await r.json();
+      if(!d.ok) alert(d.error||"failed");
       else location.href="/ui";
     }
   </script>
 </body>
 </html>`;
 }
+
 
 
 // =========================

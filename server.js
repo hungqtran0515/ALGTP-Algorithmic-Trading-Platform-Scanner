@@ -2,132 +2,35 @@
 try { require("dotenv").config(); } catch (_) {}
 
 const express = require("express");
+const axios = require("axios");
 const { clerkMiddleware, requireAuth, getAuth } = require("@clerk/express");
 
 const app = express();
 app.use(express.json());
 
-// Nếu chạy sau proxy (Render) và dùng Secure cookie:
+// Nếu chạy sau proxy (Render/Fly/NGINX) và dùng Secure cookie:
 // app.set("trust proxy", 1);
 
 const PORT = Number(process.env.PORT || 3000);
 
-// ENV
+// ===================== CLERK ENV =====================
 const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
 const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
 
-if (!CLERK_SECRET_KEY) {
-  console.log("❌ Missing CLERK_SECRET_KEY");
-} else {
+// bật/tắt auth theo env
+const CLERK_ENABLED = Boolean(CLERK_SECRET_KEY);
+
+if (CLERK_ENABLED) {
   console.log("✅ Clerk enabled");
   app.use(clerkMiddleware());
+} else {
+  console.log("⚠️ Clerk disabled (Missing CLERK_SECRET_KEY). /ui will be public.");
 }
 
-// ---------------- HTML ----------------
-function renderLoginPageClerk() {
-  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Missing CLERK_PUBLISHABLE_KEY</h2>";
+// helper middleware: nếu Clerk enabled thì yêu cầu login, còn không thì bỏ qua
+const maybeRequireAuth = CLERK_ENABLED ? requireAuth() : (req, res, next) => next();
 
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ALGTP Login</title>
-
-  <script async crossorigin="anonymous"
-    data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
-    src="https://js.clerk.com/v4/clerk.browser.js">
-  </script>
-
-  <style>
-    :root{color-scheme:dark}
-    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;
-      border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-    .muted{opacity:.8;font-size:12px;margin-top:10px;text-align:center}
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h2 style="text-align:center;margin:0 0 14px;">🔐 Login</h2>
-    <div id="clerk-signin"></div>
-    <div class="muted">After login → /ui</div>
-  </div>
-
-  <script>
-    window.addEventListener("load", async () => {
-      await Clerk.load();
-      Clerk.mountSignIn(document.getElementById("clerk-signin"), {
-        afterSignInUrl: "/ui",
-        afterSignUpUrl: "/ui"
-      });
-    });
-  </script>
-</body>
-</html>`;
-}
-
-function renderUI(userId) {
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP UI</title>
-<style>
-:root{color-scheme:dark}
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24px}
-.box{max-width:800px;margin:8vh auto;padding:20px;border-radius:14px;
-  border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-a{color:#9ad}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.8}
-</style>
-</head>
-<body>
-<div class="box">
-  <h2>✅ Private UI</h2>
-  <div class="mono">userId: ${userId}</div>
-
-  <p>Đây là trang riêng, chỉ login mới vào được.</p>
-
-  <p>
-    <a href="/logout">Logout</a>
-  </p>
-</div>
-</body>
-</html>`;
-}
-
-// ---------------- ROUTES ----------------
-
-// Home → UI
-app.get("/", (req, res) => res.redirect(302, "/ui"));
-
-// Health
-app.get("/health", (req, res) => {
-  res.json({ ok: true, login: "/login", ui: "/ui" });
-});
-
-// Login page
-app.get("/login", (req, res) => {
-  res.type("html").send(renderLoginPageClerk());
-});
-
-// Private UI (Clerk guard)
-app.get("/ui", requireAuth(), (req, res) => {
-  const { userId } = getAuth(req);
-  res.type("html").send(renderUI(userId));
-});
-
-// Logout (redirect về login)
-app.get("/logout", (req, res) => {
-  res.redirect(302, "/login");
-});
-
-
-// ---------------- ENV ----------------
-
-
+// ===================== MASSIVE ENV =====================
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
 const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
 const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
@@ -140,17 +43,30 @@ const MASSIVE_TICKER_SNAPSHOT_URL = String(
   process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
+// ✅ must be declared BEFORE envMissing()
+const MASSIVE_AGGS_URL = String(
+  process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker"
+).trim();
+
 const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
 const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
 const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 
-// ---------------- helpers ----------------
+// NOTICE(ADD): indicators toggle + bars limit
+const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
+
+// NOTICE(ADD): VWAP alert thresholds (volume spike)
+const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
+const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
+
+// ===================== helpers =====================
 function envMissing() {
   const miss = [];
   if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
   if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
   if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
-  // NOTICE(ADD): add missing env for aggs endpoint
   if (!MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
   return miss;
 }
@@ -181,12 +97,10 @@ function n(x) {
   const v = Number(x);
   return Number.isFinite(v) ? v : null;
 }
+
 function round2(x) {
   const v = n(x);
   return v === null ? null : Number(v.toFixed(2));
-}
-function clamp(x, a, b) {
-  return Math.max(a, Math.min(b, x));
 }
 
 async function mapPool(items, concurrency, fn) {
@@ -204,38 +118,6 @@ async function mapPool(items, concurrency, fn) {
   const workers = Array.from({ length: concurrency }, () => worker());
   await Promise.all(workers);
   return out;
-}
-
-// ---------------- scoring (icon + alerts) ----------------
-function demandScore(row) {
-  const gap = Math.abs(n(row?.gapPct) ?? 0);
-  const pc = Math.abs(n(row?.pricePct) ?? 0);
-
-  let s = 0;
-  if (gap >= 20) s += 1;
-  if (gap >= 40) s += 1;
-  if (gap >= 60) s += 1;
-  if (pc >= 10) s += 1;
-  if (pc >= 20) s += 1;
-
-  return clamp(s, 0, 5);
-}
-function signalIcon(d) {
-  if (d >= 5) return "🚀";
-  if (d >= 4) return "🔥";
-  if (d >= 3) return "👀";
-  return "⛔️";
-}
-
-// NOTICE(ADD): 5m VWAP/Volume/PriceAction signal icon
-function paSignalIcon(row) {
-  // price action / volume above vwap => alert + icon
-  const above = Boolean(row?.aboveVWAP_5m);
-  const volSpike = Boolean(row?.volSpike_5m);
-  if (above && volSpike) return "🚨";
-  if (above) return "✅";
-  if (volSpike) return "🔊";
-  return "";
 }
 
 // ---------------- axios safe ----------------
@@ -268,7 +150,7 @@ async function safeGet(url, { params, headers }) {
   }
 }
 
-// ---------------- Massive calls ----------------
+// ===================== Massive calls =====================
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
   const directionSafe = d === "losers" ? "losers" : "gainers";
@@ -313,7 +195,7 @@ async function fetchTickerSnapshot(ticker) {
   return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
 }
 
-// ---------------- auto-detect fields ----------------
+// ===================== auto-detect fields =====================
 function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
   if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
 
@@ -399,7 +281,6 @@ function normalizeSnapshotAuto(ticker, snap) {
     const fp = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]);
     price = fp.value;
   }
-
   if (open === null) {
     const fo = findFirstNumberByKeys(root, ["open", "o"]);
     open = fo.value;
@@ -495,41 +376,38 @@ function normalizeSnapshotAuto(ticker, snap) {
   };
 }
 
-// ---------------- group + sorting ----------------
-function groupToDirection(group) {
-  if (group === "topLosers") return "losers";
-  return "gainers";
+// ===================== scoring =====================
+function demandScore(row) {
+  const gap = Math.abs(n(row?.gapPct) ?? 0);
+  const pc = Math.abs(n(row?.pricePct) ?? 0);
+
+  let s = 0;
+  if (gap >= 20) s += 1;
+  if (gap >= 40) s += 1;
+  if (gap >= 60) s += 1;
+  if (pc >= 10) s += 1;
+  if (pc >= 20) s += 1;
+
+  return clamp(s, 0, 5);
 }
 
-function sortRowsByGroup(rows, group) {
-  if (group === "topGappers") {
-    rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
-    return;
-  }
-  rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+function signalIcon(d) {
+  if (d >= 5) return "🚀";
+  if (d >= 4) return "🔥";
+  if (d >= 3) return "👀";
+  return "⛔️";
 }
 
-function capPass(row, cap) {
-  const c = String(cap || "all").toLowerCase();
-  if (c === "all") return true;
-  if (!row.cap) return false;
-  return row.cap === c;
+function paSignalIcon(row) {
+  const above = Boolean(row?.aboveVWAP_5m);
+  const volSpike = Boolean(row?.volSpike_5m);
+  if (above && volSpike) return "🚨";
+  if (above) return "✅";
+  if (volSpike) return "🔊";
+  return "";
 }
 
-// -----------------------------------------------------------------------------
-// NOTICE(ADD): 5m aggregates endpoint for indicators (SMA/EMA/VWAP)
-// -----------------------------------------------------------------------------
-const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
-
-// NOTICE(ADD): indicators toggle + bars limit
-const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
-const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
-
-// NOTICE(ADD): VWAP alert thresholds (volume spike)
-const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
-const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
-
-// NOTICE(ADD): Indicators (SMA/EMA/VWAP) computed from 5m bars
+// ===================== 5m indicators =====================
 function computeSMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
   let sum = 0;
@@ -540,8 +418,6 @@ function computeSMA(closes, len) {
 function computeEMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
   const k = 2 / (len + 1);
-
-  // closes must be chronological (oldest -> newest)
   const seed = computeSMA(closes.slice(0, len), len);
   if (seed === null) return null;
 
@@ -552,7 +428,6 @@ function computeEMA(closes, len) {
   return ema;
 }
 
-// VWAP: sum(close * volume) / sum(volume)
 function computeVWAP(closes, volumes) {
   if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length)
     return null;
@@ -584,7 +459,6 @@ function computeAvg(arr) {
 }
 
 function indicatorsFromAggs5m(barsDesc) {
-  // barsDesc usually newest first (sort=desc)
   if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
     return {
       sma26_5m: null,
@@ -601,13 +475,13 @@ function indicatorsFromAggs5m(barsDesc) {
     .map((b) => ({
       c: n(b?.c ?? b?.close),
       v: n(b?.v ?? b?.volume),
-      vw: n(b?.vw), // if API provides bar vwap
+      vw: n(b?.vw),
       t: n(b?.t) ?? null,
     }))
     .filter((x) => x.c !== null)
     .slice(0, 400);
 
-  const barsChrono = [...bars].reverse(); // oldest -> newest
+  const barsChrono = [...bars].reverse();
   const closes = barsChrono.map((x) => x.c);
   const vols = barsChrono.map((x) => x.v ?? 0);
 
@@ -616,7 +490,6 @@ function indicatorsFromAggs5m(barsDesc) {
 
   const ema9 = computeEMA(closes, 9);
   const ema34 = computeEMA(closes, 34);
-
   const vwap = computeVWAP(closes, vols);
 
   const lastBar = barsChrono[barsChrono.length - 1] || null;
@@ -636,9 +509,7 @@ function indicatorsFromAggs5m(barsDesc) {
   };
 }
 
-// NOTICE(ADD): 5m aggregates fetch + small in-memory cache
 const aggsCache = new Map(); // key: "TICKER|5m" -> { ts, bars }
-
 function ymd(d) {
   const x = new Date(d);
   const yyyy = x.getFullYear();
@@ -652,13 +523,10 @@ async function fetchAggs5m(ticker) {
   const cacheKey = `${sym}|5m`;
   const now = Date.now();
 
-  // cache 25s (UI refresh default 30s)
   const hit = aggsCache.get(cacheKey);
   if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
 
   const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
-
-  // window đủ cho EMA34 + SMA26 (lấy ~5 ngày)
   const to = ymd(new Date());
   const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
 
@@ -678,7 +546,6 @@ async function fetchAggs5m(ticker) {
   return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
 }
 
-// NOTICE(ADD): derive VWAP alerts for 5m
 function attach5mSignals(row) {
   const price = n(row?.price);
   const vwap = n(row?.vwap_5m);
@@ -695,8 +562,101 @@ function attach5mSignals(row) {
   };
 }
 
-// ---------------- UI ----------------
-function renderUI(preset = {}) {
+// ===================== group + sorting =====================
+function groupToDirection(group) {
+  if (group === "topLosers") return "losers";
+  return "gainers";
+}
+
+function sortRowsByGroup(rows, group) {
+  if (group === "topGappers") {
+    rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
+    return;
+  }
+  rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+}
+
+function capPass(row, cap) {
+  const c = String(cap || "all").toLowerCase();
+  if (c === "all") return true;
+  if (!row.cap) return false;
+  return row.cap === c;
+}
+
+// ===================== HTML: Clerk Login =====================
+function renderLoginPageClerk() {
+  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Missing CLERK_PUBLISHABLE_KEY</h2>";
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP Login</title>
+
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
+    src="https://js.clerk.com/v4/clerk.browser.js">
+  </script>
+
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;
+      border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    .muted{opacity:.8;font-size:12px;margin-top:10px;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2 style="text-align:center;margin:0 0 14px;">🔐 Login</h2>
+    <div id="clerk-signin"></div>
+    <div class="muted">After login → /ui</div>
+  </div>
+
+  <script>
+    window.addEventListener("load", async () => {
+      await Clerk.load();
+      Clerk.mountSignIn(document.getElementById("clerk-signin"), {
+        afterSignInUrl: "/ui",
+        afterSignUpUrl: "/ui"
+      });
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function renderLogoutPage() {
+  if (!CLERK_PUBLISHABLE_KEY) return `<script>location.href="/login"</script>`;
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Logout</title>
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
+    src="https://js.clerk.com/v4/clerk.browser.js">
+  </script>
+</head>
+<body style="margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;display:grid;place-items:center;height:100vh">
+  <div>Signing out...</div>
+  <script>
+    window.addEventListener("load", async () => {
+      try{
+        await Clerk.load();
+        await Clerk.signOut();
+      }catch(e){}
+      location.href="/login";
+    });
+  </script>
+</body>
+</html>`;
+}
+
+// ===================== HTML: Scanner UI (Protected) =====================
+function renderScannerUI(preset = {}, authInfo = {}) {
   const presetGroup = preset.group || "topGainers";
   const presetCap = preset.cap || "all";
   const presetLimit = preset.limit || 50;
@@ -704,12 +664,16 @@ function renderUI(preset = {}) {
   const presetSymbols = preset.symbols ?? "NVDA,TSLA,AAPL";
   const active = (path) => (preset.path === path ? "opacity:1" : "opacity:.65");
 
+  const userLine = CLERK_ENABLED
+    ? `<div class="sub">Signed in: <span class="mono">${String(authInfo.userId || "unknown")}</span> • <a href="/logout">Logout</a></div>`
+    : `<div class="sub">Auth: <b>OFF</b> (dev mode) • <a href="/login">Login</a></div>`;
+
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ALGTP™ – Algorithmic Trading Platform Scanner</title>
+  <title>ALGTP™ – Scanner</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0d12; color:#e6e8ef;}
@@ -761,7 +725,8 @@ function renderUI(preset = {}) {
 <header>
   <div class="wrap">
     <h1>ALGTP™ – Algorithmic Trading Platform Scanner</h1>
-    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Alerts • Auto Refresh • Scan Symbols • Click ticker for chart • 5m SMA/EMA/VWAP</div>
+    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Alerts • Auto Refresh • Click ticker for chart • 5m SMA/EMA/VWAP</div>
+    ${userLine}
 
     <div class="nav">
       <a href="/ui" style="${active("/ui")}">Dashboard</a>
@@ -819,7 +784,6 @@ function renderUI(preset = {}) {
       <input id="alertGap" placeholder="Alert gap% >= (default 20)" style="min-width:180px;" />
       <input id="alertPrice" placeholder="Alert price% >= (default 20)" style="min-width:200px;" />
 
-      <!-- NOTICE(ADD): 5m VWAP/Volume alert thresholds -->
       <input id="alertAboveVWAP" placeholder="Alert if Price > VWAP (5m): 1/0 (default 1)" style="min-width:260px;" />
       <input id="alertVolSpike" placeholder="Alert if VolSpike (5m): 1/0 (default 1)" style="min-width:260px;" />
 
@@ -849,7 +813,6 @@ function renderUI(preset = {}) {
 
 <div class="watermark">Powered by ALGTP™</div>
 
-<!-- Chart Modal -->
 <div class="modalBack" id="modalBack" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modalTop">
@@ -984,7 +947,6 @@ function fireAlert(r, cfg){
   if (r.floatM != null) parts.push(\`Float(M): \${r.floatM}\`);
   if (r.marketCapB != null) parts.push(\`MCap(B): \${r.marketCapB}\`);
 
-  // NOTICE(ADD): 5m indicators + VWAP signals in alert body
   if (r.sma26_5m != null) parts.push(\`SMA26(5m): \${r.sma26_5m}\`);
   if (r.ema9_5m != null) parts.push(\`EMA9(5m): \${r.ema9_5m}\`);
   if (r.ema34_5m != null) parts.push(\`EMA34(5m): \${r.ema34_5m}\`);
@@ -1016,7 +978,7 @@ async function enableNotifications(){
   }
 }
 
-// -------- Chart Modal (click ticker) --------
+// -------- Chart Modal --------
 const modalBack = byId("modalBack");
 const modalTitle = byId("modalTitle");
 const chartBox = byId("chartBox");
@@ -1024,10 +986,7 @@ const exSel = byId("exSel");
 const tfSel = byId("tfSel");
 let currentSymbol = null;
 
-function openModal(){
-  modalBack.style.display = "flex";
-  modalBack.setAttribute("aria-hidden", "false");
-}
+function openModal(){ modalBack.style.display = "flex"; modalBack.setAttribute("aria-hidden", "false"); }
 function closeModal(){
   modalBack.style.display = "none";
   modalBack.setAttribute("aria-hidden", "true");
@@ -1074,7 +1033,6 @@ function openChart(sym){
 byId("closeBtn").addEventListener("click", closeModal);
 modalBack.addEventListener("click", (e)=>{ if (e.target === modalBack) closeModal(); });
 document.addEventListener("keydown", (e)=>{ if (e.key === "Escape") closeModal(); });
-
 exSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
 tfSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
 
@@ -1180,7 +1138,7 @@ function applyAuto(){
   startAuto(safeSec);
 }
 
-// -------- Run (Mode aware) --------
+// -------- Run --------
 async function run(){
   clearError();
   out.innerHTML = "";
@@ -1246,14 +1204,10 @@ function setPreset(){
 
 byId("runBtn").addEventListener("click", run);
 byId("notifyBtn").addEventListener("click", enableNotifications);
-byId("clearAlertsBtn").addEventListener("click", ()=>{
-  alerted.clear();
-  alert("Alert memory cleared.");
-});
+byId("clearAlertsBtn").addEventListener("click", ()=>{ alerted.clear(); alert("Alert memory cleared."); });
 
 byId("applyAutoBtn").addEventListener("click", applyAuto);
 byId("stopAutoBtn").addEventListener("click", stopAuto);
-
 byId("mode").addEventListener("change", ()=>{ stopAuto(); });
 
 setPreset();
@@ -1263,41 +1217,33 @@ run();
 </html>`;
 }
 
-// ---------------- UI routes ----------------
-app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 50 })));
-app.get("/ui/gainers", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 50 }))
-);
-app.get("/ui/losers", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 50 }))
-);
-app.get("/ui/gappers", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/gappers", group: "topGappers", cap: "all", limit: 80, minGap: 10 }))
-);
-app.get("/ui/smallcap", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/smallcap", group: "topGainers", cap: "small", limit: 80 }))
-);
-app.get("/ui/midcap", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80 }))
-);
-app.get("/ui/bigcap", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80 }))
-);
+// ===================== ROUTES =====================
 
-// ---------------- API routes ----------------
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "ALGTP™ – Algorithmic Trading Platform Scanner running ✅",
-    ui: "/ui",
-    pages: ["/ui", "/ui/gainers", "/ui/losers", "/ui/gappers", "/ui/smallcap", "/ui/midcap", "/ui/bigcap"],
-    examples: ["/list?group=topGappers&limit=80&cap=all&minGap=10", "/scan?symbols=NVDA,TSLA,AAPL"],
-  });
+// Home → UI
+app.get("/", (req, res) => res.redirect(302, "/ui"));
+
+// Health
+app.get("/health", (req, res) => {
+  res.json({ ok: true, login: "/login", ui: "/ui", clerkEnabled: CLERK_ENABLED });
 });
 
+// Login page (only meaningful if Clerk enabled)
+app.get("/login", (req, res) => {
+  if (!CLERK_ENABLED) return res.redirect(302, "/ui");
+  res.type("html").send(renderLoginPageClerk());
+});
+
+// Logout page
+app.get("/logout", (req, res) => {
+  if (!CLERK_ENABLED) return res.redirect(302, "/ui");
+  res.type("html").send(renderLogoutPage());
+});
+
+// Debug api
 app.get("/api", (req, res) => {
   res.json({
     ok: true,
+    clerkEnabled: CLERK_ENABLED,
     envMissing: envMissing(),
     config: {
       port: PORT,
@@ -1308,8 +1254,6 @@ app.get("/api", (req, res) => {
       includeOtc: INCLUDE_OTC,
       snapConcurrency: SNAP_CONCURRENCY,
       debug: DEBUG,
-
-      // NOTICE(ADD)
       aggsUrl: MASSIVE_AGGS_URL,
       enable5mIndicators: ENABLE_5M_INDICATORS,
       aggs5mLimit: AGGS_5M_LIMIT,
@@ -1319,23 +1263,56 @@ app.get("/api", (req, res) => {
   });
 });
 
-app.get("/env", (req, res) => {
-  res.json({
-    ok: true,
-    hasKey: Boolean(MASSIVE_API_KEY),
-    authType: MASSIVE_AUTH_TYPE,
-    queryKeyName: MASSIVE_QUERY_KEYNAME,
-    moverBase: MASSIVE_MOVER_URL,
-    tickerBase: MASSIVE_TICKER_SNAPSHOT_URL,
+// ===================== UI routes (Protected) =====================
+function getAuthInfo(req) {
+  if (!CLERK_ENABLED) return { userId: null };
+  const a = getAuth(req);
+  return { userId: a?.userId || null };
+}
 
-    // NOTICE(ADD)
-    aggsBase: MASSIVE_AGGS_URL,
-    enable5mIndicators: ENABLE_5M_INDICATORS,
-    aggs5mLimit: AGGS_5M_LIMIT,
-  });
-});
+app.get("/ui", maybeRequireAuth, (req, res) =>
+  res.type("html").send(renderScannerUI({ path: "/ui", group: "topGainers", cap: "all", limit: 50 }, getAuthInfo(req)))
+);
 
-// Symbols scan endpoint (for TSLA/NVDA anytime)
+app.get("/ui/gainers", maybeRequireAuth, (req, res) =>
+  res
+    .type("html")
+    .send(renderScannerUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 50 }, getAuthInfo(req)))
+);
+
+app.get("/ui/losers", maybeRequireAuth, (req, res) =>
+  res
+    .type("html")
+    .send(renderScannerUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 50 }, getAuthInfo(req)))
+);
+
+app.get("/ui/gappers", maybeRequireAuth, (req, res) =>
+  res
+    .type("html")
+    .send(renderScannerUI({ path: "/ui/gappers", group: "topGappers", cap: "all", limit: 80, minGap: 10 }, getAuthInfo(req)))
+);
+
+app.get("/ui/smallcap", maybeRequireAuth, (req, res) =>
+  res
+    .type("html")
+    .send(renderScannerUI({ path: "/ui/smallcap", group: "topGainers", cap: "small", limit: 80 }, getAuthInfo(req)))
+);
+
+app.get("/ui/midcap", maybeRequireAuth, (req, res) =>
+  res
+    .type("html")
+    .send(renderScannerUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80 }, getAuthInfo(req)))
+);
+
+app.get("/ui/bigcap", maybeRequireAuth, (req, res) =>
+  res
+    .type("html")
+    .send(renderScannerUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80 }, getAuthInfo(req)))
+);
+
+// ===================== API routes =====================
+
+// Symbols scan endpoint
 app.get("/scan", async (req, res) => {
   try {
     const miss = envMissing();
@@ -1353,7 +1330,6 @@ app.get("/scan", async (req, res) => {
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
 
-    // NOTICE(REPLACE+ADD): attach 5m indicators (SMA26/EMA9/EMA34/VWAP)
     const aggsErrors = [];
     if (ENABLE_5M_INDICATORS) {
       const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
@@ -1363,7 +1339,6 @@ app.get("/scan", async (req, res) => {
           return {
             symbol: r.symbol,
             __aggsOk: false,
-            __aggsErr: a.errorDetail || { status: a.status, url: a.url },
             sma26_5m: null,
             ema9_5m: null,
             ema34_5m: null,
@@ -1438,7 +1413,6 @@ app.get("/list", async (req, res) => {
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
 
-    // NOTICE(REPLACE+ADD): attach 5m indicators (SMA26/EMA9/EMA34/VWAP)
     const aggsErrors = [];
     if (ENABLE_5M_INDICATORS) {
       const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
@@ -1448,7 +1422,6 @@ app.get("/list", async (req, res) => {
           return {
             symbol: r.symbol,
             __aggsOk: false,
-            __aggsErr: a.errorDetail || { status: a.status, url: a.url },
             sma26_5m: null,
             ema9_5m: null,
             ema34_5m: null,
@@ -1497,10 +1470,9 @@ app.get("/list", async (req, res) => {
   }
 });
 
-// ---------------- START ----------------
+// ===================== START =====================
 app.listen(PORT, () => {
   console.log(`✅ Server running: http://localhost:${PORT}`);
-  console.log(`🔐 Login: http://localhost:${PORT}/login`);
   console.log(`🖥 UI: http://localhost:${PORT}/ui`);
+  if (CLERK_ENABLED) console.log(`🔐 Login: http://localhost:${PORT}/login`);
 });
-

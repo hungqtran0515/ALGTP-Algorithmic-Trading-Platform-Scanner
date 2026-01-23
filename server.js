@@ -19,7 +19,10 @@ app.use(express.json());
 
 
 /* =========================
-   ✅ OTP (Twilio) ENV — CLEAN (NO DUPLICATE, NO SYNTAX ERROR)
+   ✅ OTP (Twilio) ENV — FINAL CLEAN VERSION
+   - NO duplicate const
+   - NO duplicate function
+   - NO syntax-chain error
 ========================= */
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN  = String(process.env.TWILIO_AUTH_TOKEN  || "").trim();
@@ -29,14 +32,14 @@ const TWILIO_FROM = String(process.env.TWILIO_FROM || "")
   .trim()
   .replace(/[^\d+]/g, ""); // "+1 708 578 5219" -> "+17085785219"
 
-const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
+const OTP_TTL_SEC   = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
 
 function isE164(s) {
   return /^\+\d{10,15}$/.test(String(s || ""));
 }
 
-// Twilio only enabled if all present AND FROM is E.164
+// Twilio enabled only if all present AND FROM is valid E.164
 const hasTwilio = Boolean(
   TWILIO_ACCOUNT_SID &&
   TWILIO_AUTH_TOKEN &&
@@ -55,6 +58,7 @@ if (!hasTwilio) {
   console.log("✅ Twilio enabled. FROM =", TWILIO_FROM);
 }
 
+// Create client only if ready
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
 /* =========================
@@ -99,47 +103,26 @@ function setCookie(res, name, value, maxAgeSec) {
 }
 
 /* =========================
-   ✅ Phone normalize -> E.164 US (+1...)
-========================= */
-function normalizePhone(input) {
-  let s = String(input || "").trim();
-  if (!s) return null;
-
-  s = s.replace(/[^\d+]/g, ""); // keep only + and digits
-
-  if (s.startsWith("+")) {
-    const digits = s.slice(1).replace(/\D/g, "");
-    if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-    if (digits.length === 10) return "+1" + digits;
-    return null;
-  }
-
-  const digits = s.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-  if (digits.length === 10) return "+1" + digits;
-
-  return null;
-}
-
-
-/* =========================
    ✅ PHONE NORMALIZE (ONE VERSION ONLY)
+   Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
 ========================= */
 function normalizePhone(input) {
   let s = String(input || "").trim();
   if (!s) return null;
 
+  // keep only + and digits
   s = s.replace(/[^\d+]/g, "");
 
   if (s.startsWith("+")) {
-    const d = s.slice(1);
+    const d = s.slice(1).replace(/\D/g, "");
     if (d.length === 11 && d.startsWith("1")) return "+" + d;
     if (d.length === 10) return "+1" + d;
     return null;
   }
 
-  if (s.length === 11 && s.startsWith("1")) return "+" + s;
-  if (s.length === 10) return "+1" + s;
+  const d = s.replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("1")) return "+" + d;
+  if (d.length === 10) return "+1" + d;
 
   return null;
 }

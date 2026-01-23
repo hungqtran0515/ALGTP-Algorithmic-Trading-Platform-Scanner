@@ -1766,7 +1766,7 @@ app.get("/list", async (req, res) => {
   }
 });
 
-const PORT = Number(process.env.PORT || 3000);
+
 
 app.listen(PORT, () => {
   console.log(`✅ ALGTP™ Scanner running on port ${PORT}`);

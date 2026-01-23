@@ -1766,8 +1766,10 @@ app.get("/list", async (req, res) => {
   }
 });
 
+const PORT = Number(process.env.PORT || 3000);
+
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
-  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
+  console.log(`✅ ALGTP™ Scanner running on port ${PORT}`);
+  console.log(`🚀 UI: /ui`);
   console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
 });

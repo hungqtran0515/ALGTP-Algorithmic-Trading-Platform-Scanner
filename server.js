@@ -1770,8 +1770,7 @@ app.get("/list", async (req, res) => {
 const PORT = Number(process.env.PORT || 3000);
 
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-  console.log(`➡️ Try: /health  /login  /ui`);
+  console.log(`✅ ALGTP™ running on port ${PORT}`);
+  console.log(`➡️ UI: /ui`);
 });
-
 

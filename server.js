@@ -19,17 +19,17 @@ app.use(express.json());
 
 
 /* =========================
-   ✅ OTP (Twilio) ENV – CLEAN VERSION
+   ✅ OTP (Twilio) ENV — CLEAN (NO DUPLICATE, NO SYNTAX ERROR)
 ========================= */
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN  = String(process.env.TWILIO_AUTH_TOKEN  || "").trim();
 
-// Keep only "+" and digits
+// Keep only "+" and digits (Render UI hay bị copy có space)
 const TWILIO_FROM = String(process.env.TWILIO_FROM || "")
   .trim()
-  .replace(/[^\d+]/g, "");
+  .replace(/[^\d+]/g, ""); // "+1 708 578 5219" -> "+17085785219"
 
-const OTP_TTL_SEC  = Math.max(60, Number(process.env.OTP_TTL_SEC || 300));
+const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
 
 function isE164(s) {
@@ -44,15 +44,20 @@ const hasTwilio = Boolean(
 );
 
 if (!hasTwilio) {
-  console.log("⚠️ Twilio disabled. Check ENV variables.");
+  const miss = [];
+  if (!TWILIO_ACCOUNT_SID) miss.push("TWILIO_ACCOUNT_SID");
+  if (!TWILIO_AUTH_TOKEN) miss.push("TWILIO_AUTH_TOKEN");
+  if (!TWILIO_FROM) miss.push("TWILIO_FROM");
+  if (TWILIO_FROM && !isE164(TWILIO_FROM)) miss.push("TWILIO_FROM(not E.164)");
+  console.log("⚠️ Twilio disabled. Missing/invalid:", miss.join(", "));
+} else {
+  console.log("✅ Twilio enabled. FROM =", TWILIO_FROM);
 }
 
-const tw = hasTwilio
-  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-  : null;
+const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
 /* =========================
-   ✅ OTP STORE
+   ✅ OTP STORE + HELPERS
 ========================= */
 const otpStore = new Map(); // phone -> { otp, expMs }
 
@@ -67,9 +72,6 @@ function cleanupOtp() {
   }
 }
 
-/* =========================
-   ✅ COOKIE HELPERS
-========================= */
 function parseCookie(req) {
   const raw = req.headers?.cookie || "";
   const out = {};
@@ -91,6 +93,27 @@ function setCookie(res, name, value, maxAgeSec) {
   if (COOKIE_SECURE) parts.push("Secure");
   res.setHeader("Set-Cookie", parts.join("; "));
 }
+
+function normalizePhone(input) {
+  // Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
+  let s = String(input || "").trim();
+  if (!s) return null;
+
+  s = s.replace(/[^\d+]/g, ""); // keep only + and digits
+
+  if (s.startsWith("+")) {
+    const digits = s.slice(1).replace(/\D/g, "");
+    if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+    if (digits.length === 10) return "+1" + digits;
+    return null;
+  }
+
+  const digits = s.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+  if (digits.length === 10) return "+1" + digits;
+  return null;
+}
+
 
 /* =========================
    ✅ PHONE NORMALIZE (ONE VERSION ONLY)

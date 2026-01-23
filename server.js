@@ -237,36 +237,7 @@ function fmtDate(ms) {
   try { return new Date(ms).toLocaleString("en-US"); } catch { return String(ms); }
 }
 
-function renderPaywallPage(access = {}) {
-  const trialEnd = access?.user?.trial_end ? fmtDate(access.user.trial_end) : "-";
-  return `<!doctype html>
-<html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP Access</title>
-<style>
-:root{color-scheme:dark}
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-a{display:inline-block;text-decoration:none}
-.btn{background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;margin-right:10px}
-.btn:hover{border-color:rgba(255,255,255,.28)}
-.muted{opacity:.85;line-height:1.7}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-</style>
-</head><body>
-<div class="box">
-  <h2 style="margin:0 0 8px;">⛔ Trial expired / Access blocked</h2>
-  <div class="muted">
-    Trial <b>${TRIAL_DAYS} ngày</b> đã hết hạn (Trial end: <span class="mono">${trialEnd}</span>).<br/>
-    Toàn bộ tính năng đang bị khóa. Vui lòng mua <b>Plan ${PAID_DAYS} ngày</b> để mở lại.
-  </div>
-  <div style="margin-top:14px;">
-    <a class="btn" href="/pricing">Pay (Stripe)</a>
-    <a class="btn" href="/login">Login</a>
-  </div>
-</div>
-</body></html>`;
-}
+
 
 /* =========================
    ✅ PUBLIC ROUTES: login / pricing / stripe webhook
@@ -1796,9 +1767,11 @@ app.get("/list", async (req, res) => {
 
 
 
+const PORT = Number(process.env.PORT || 3000);
+
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
-  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
-  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`➡️ Try: /health  /login  /ui`);
 });
+
 

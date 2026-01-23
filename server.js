@@ -19,34 +19,42 @@ app.use(express.json());
 
 
 /* =========================
-   ✅ OTP (Twilio) ENV (FIX)
+   ✅ OTP (Twilio) ENV (REWRITE / SAFE)
 ========================= */
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN  = String(process.env.TWILIO_AUTH_TOKEN  || "").trim();
 
-// FIX: remove spaces/dashes in TWILIO_FROM, keep + and digits only
+// Keep only "+" and digits (Render UI hay bị copy có space)
 const TWILIO_FROM = String(process.env.TWILIO_FROM || "")
   .trim()
-  .replace(/[^\d+]/g, ""); // "+1 708 578..." -> "+1708578..."
+  .replace(/[^\d+]/g, ""); // "+1 708 578 5219" -> "+17085785219"
 
 const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
 
-// FIX: strict boolean
-const hasTwilio = Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM);
-
-// OPTIONAL: quick format check (E.164)
 function isE164(s) {
   return /^\+\d{10,15}$/.test(String(s || ""));
 }
 
-if (hasTwilio && !isE164(TWILIO_FROM)) {
-  console.log("⚠️ TWILIO_FROM invalid E.164:", TWILIO_FROM);
+const hasTwilio = Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM);
+
+if (!hasTwilio) {
+  const miss = [];
+  if (!TWILIO_ACCOUNT_SID) miss.push("TWILIO_ACCOUNT_SID");
+  if (!TWILIO_AUTH_TOKEN) miss.push("TWILIO_AUTH_TOKEN");
+  if (!TWILIO_FROM) miss.push("TWILIO_FROM");
+  console.log("⚠️ Twilio disabled. Missing:", miss.join(", ") || "(unknown)");
+} else if (!isE164(TWILIO_FROM)) {
+  console.log("⚠️ TWILIO_FROM is not valid E.164. Current:", TWILIO_FROM);
+  console.log("✅ Example E.164:", "+17085785219");
 }
 
+// Only create client if Twilio is ready
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
-
+/* =========================
+   ✅ OTP STORE + HELPERS
+========================= */
 // In-memory OTP store: phone -> { otp, expMs }
 const otpStore = new Map();
 
@@ -56,11 +64,13 @@ function nowMs() {
 
 function cleanupOtp() {
   const t = nowMs();
-  for (const [k, v] of otpStore.entries()) if (v.expMs <= t) otpStore.delete(k);
+  for (const [phone, rec] of otpStore.entries()) {
+    if (!rec || rec.expMs <= t) otpStore.delete(phone);
+  }
 }
 
 function parseCookie(req) {
-  const raw = req.headers.cookie || "";
+  const raw = req.headers?.cookie || "";
   const out = {};
   raw.split(";").forEach((p) => {
     const i = p.indexOf("=");
@@ -74,11 +84,39 @@ function setCookie(res, name, value, maxAgeSec) {
     `${name}=${encodeURIComponent(value)}`,
     "Path=/",
     "SameSite=Lax",
-    `Max-Age=${maxAgeSec}`,
-    "HttpOnly", // ✅ IMPORTANT: JS không đọc cookie
+    `Max-Age=${Math.max(0, Number(maxAgeSec || 0))}`,
+    "HttpOnly",
   ];
   if (COOKIE_SECURE) parts.push("Secure");
   res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+/* =========================
+   ✅ Phone normalize -> E.164 US (+1...)
+   Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
+========================= */
+function normalizePhone(input) {
+  let s = String(input || "").trim();
+  if (!s) return null;
+
+  // keep only + and digits
+  s = s.replace(/[^\d+]/g, "");
+
+  // If already has "+"
+  if (s.startsWith("+")) {
+    const digits = s.slice(1).replace(/\D/g, "");
+    // US:
+    if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+    if (digits.length === 10) return "+1" + digits;
+    return null; // not supported
+  }
+
+  // No "+"
+  const digits = s.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
+  if (digits.length === 10) return "+1" + digits;
+
+  return null;
 }
 
 function normalizePhone(input) {

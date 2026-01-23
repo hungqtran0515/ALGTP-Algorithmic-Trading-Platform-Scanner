@@ -118,7 +118,35 @@ function normalizePhone(input) {
 
   return null;
 }
-
+function renderLoginPage(msg = "") {
+  return `<!doctype html>
+  <html>
+    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body style="font-family:system-ui;background:#0b0d12;color:#e6e8ef">
+      <div style="max-width:560px;margin:10vh auto;padding:18px;border:1px solid rgba(255,255,255,.14);border-radius:14px;background:rgba(18,24,43,.55)">
+        <h2>🔐 Login (SMS OTP)</h2>
+        ${msg ? `<div style="color:#ffb4b4;margin:10px 0">${msg}</div>` : ""}
+        <input id="phone" placeholder="Phone" style="width:100%;padding:12px;border-radius:10px;margin:6px 0" />
+        <button onclick="startOtp()" style="width:100%;padding:12px;border-radius:10px">Send OTP</button>
+        <input id="otp" placeholder="OTP 6 digits" style="width:100%;padding:12px;border-radius:10px;margin:12px 0 6px" />
+        <button onclick="verifyOtp()" style="width:100%;padding:12px;border-radius:10px">Verify</button>
+      </div>
+      <script>
+      async function startOtp(){
+        const phone=document.getElementById("phone").value.trim();
+        const r=await fetch("/auth/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone})});
+        const d=await r.json(); if(!d.ok) alert(d.error||"failed"); else alert("OTP sent");
+      }
+      async function verifyOtp(){
+        const phone=document.getElementById("phone").value.trim();
+        const otp=document.getElementById("otp").value.trim();
+        const r=await fetch("/auth/verify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone,otp})});
+        const d=await r.json(); if(!d.ok) alert(d.error||"failed"); else location.href="/ui";
+      }
+      </script>
+    </body>
+  </html>`;
+}
 
 /* =========================
    ✅ TIMING STORE: TRIAL 14D + PAID 30D (users.json)

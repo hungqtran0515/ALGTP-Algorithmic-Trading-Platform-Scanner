@@ -19,44 +19,42 @@ app.use(express.json());
 
 
 /* =========================
-   ✅ OTP (Twilio) ENV (REWRITE / SAFE)
+   ✅ OTP (Twilio) ENV – CLEAN VERSION
 ========================= */
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN  = String(process.env.TWILIO_AUTH_TOKEN  || "").trim();
 
-// Keep only "+" and digits (Render UI hay bị copy có space)
+// Keep only "+" and digits
 const TWILIO_FROM = String(process.env.TWILIO_FROM || "")
   .trim()
-  .replace(/[^\d+]/g, ""); // "+1 708 578 5219" -> "+17085785219"
+  .replace(/[^\d+]/g, "");
 
-const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
+const OTP_TTL_SEC  = Math.max(60, Number(process.env.OTP_TTL_SEC || 300));
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
 
 function isE164(s) {
   return /^\+\d{10,15}$/.test(String(s || ""));
 }
 
-const hasTwilio = Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM);
+const hasTwilio = Boolean(
+  TWILIO_ACCOUNT_SID &&
+  TWILIO_AUTH_TOKEN &&
+  TWILIO_FROM &&
+  isE164(TWILIO_FROM)
+);
 
 if (!hasTwilio) {
-  const miss = [];
-  if (!TWILIO_ACCOUNT_SID) miss.push("TWILIO_ACCOUNT_SID");
-  if (!TWILIO_AUTH_TOKEN) miss.push("TWILIO_AUTH_TOKEN");
-  if (!TWILIO_FROM) miss.push("TWILIO_FROM");
-  console.log("⚠️ Twilio disabled. Missing:", miss.join(", ") || "(unknown)");
-} else if (!isE164(TWILIO_FROM)) {
-  console.log("⚠️ TWILIO_FROM is not valid E.164. Current:", TWILIO_FROM);
-  console.log("✅ Example E.164:", "+17085785219");
+  console.log("⚠️ Twilio disabled. Check ENV variables.");
 }
 
-// Only create client if Twilio is ready
-const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
+const tw = hasTwilio
+  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+  : null;
 
 /* =========================
-   ✅ OTP STORE + HELPERS
+   ✅ OTP STORE
 ========================= */
-// In-memory OTP store: phone -> { otp, expMs }
-const otpStore = new Map();
+const otpStore = new Map(); // phone -> { otp, expMs }
 
 function nowMs() {
   return Date.now();
@@ -69,6 +67,9 @@ function cleanupOtp() {
   }
 }
 
+/* =========================
+   ✅ COOKIE HELPERS
+========================= */
 function parseCookie(req) {
   const raw = req.headers?.cookie || "";
   const out = {};
@@ -92,113 +93,27 @@ function setCookie(res, name, value, maxAgeSec) {
 }
 
 /* =========================
-   ✅ Phone normalize -> E.164 US (+1...)
-   Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
+   ✅ PHONE NORMALIZE (ONE VERSION ONLY)
 ========================= */
 function normalizePhone(input) {
   let s = String(input || "").trim();
   if (!s) return null;
 
-  // keep only + and digits
-  s = s.replace(/[^\d+]/g, "");
-
-  // If already has "+"
-  if (s.startsWith("+")) {
-    const digits = s.slice(1).replace(/\D/g, "");
-    // US:
-    if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-    if (digits.length === 10) return "+1" + digits;
-    return null; // not supported
-  }
-
-  // No "+"
-  const digits = s.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-  if (digits.length === 10) return "+1" + digits;
-
-  return null;
-}
-
-function normalizePhone(input) {
-  // Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
-  let s = String(input || "").trim();
-  if (!s) return null;
-
-  // remove spaces, dashes, parentheses
   s = s.replace(/[^\d+]/g, "");
 
   if (s.startsWith("+")) {
-    const digits = s.slice(1).replace(/\D/g, "");
-    if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-    if (digits.length === 10) return "+1" + digits;
+    const d = s.slice(1);
+    if (d.length === 11 && d.startsWith("1")) return "+" + d;
+    if (d.length === 10) return "+1" + d;
     return null;
   }
 
-  const digits = s.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-  if (digits.length === 10) return "+1" + digits;
+  if (s.length === 11 && s.startsWith("1")) return "+" + s;
+  if (s.length === 10) return "+1" + s;
 
   return null;
 }
 
-function renderLoginPage(msg = "") {
-  return `<!doctype html>
-<html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP Login</title>
-<style>
-:root{color-scheme:dark}
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:560px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:10px;padding:12px;font-size:14px}
-button{cursor:pointer;margin-top:10px}
-.muted{opacity:.8;font-size:13px;line-height:1.6}
-.err{margin-top:10px;color:#ffb4b4}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-</style>
-</head><body>
-<div class="box">
-  <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
-  <div class="muted">Chỉ cần SMS OTP verify là vào được. Hết trial sẽ bị khóa toàn bộ.</div>
-  <div class="mono" style="margin-top:8px;">Format: 12199868683 / 2199868683 / +12199868683</div>
-  ${msg ? `<div class="err">${msg}</div>` : ""}
-
-  <input id="phone" placeholder="Phone" />
-  <button onclick="startOtp()">Send OTP</button>
-
-  <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
-  <button onclick="verifyOtp()">Verify</button>
-
-  <div class="muted" style="margin-top:12px;">Sau verify: tự chuyển qua <span class="mono">/ui</span></div>
-</div>
-
-<script>
-async function startOtp(){
-  const phone = document.getElementById("phone").value.trim();
-  const r = await fetch("/auth/start", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ phone })
-  });
-  const d = await r.json();
-  if(!d.ok) alert("Error: " + (d.error||"failed"));
-  else alert("OTP sent");
-}
-async function verifyOtp(){
-  const phone = document.getElementById("phone").value.trim();
-  const otp = document.getElementById("otp").value.trim();
-  const r = await fetch("/auth/verify", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify({ phone, otp })
-  });
-  const d = await r.json();
-  if(!d.ok) alert("Error: " + (d.error||"failed"));
-  else location.href="/ui";
-}
-</script>
-</body></html>`;
-}
 
 /* =========================
    ✅ TIMING STORE: TRIAL 14D + PAID 30D (users.json)

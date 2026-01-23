@@ -471,9 +471,7 @@ app.use((req, res, next) => {
   return res.status(402).type("html").send(renderPaywallPage(access));
 });
 
-/* =========================
-   ✅ NOW PASTE YOUR SCANNER CODE BELOW
-   Start from: 
+
 
 
 // ---------------- ENV ----------------

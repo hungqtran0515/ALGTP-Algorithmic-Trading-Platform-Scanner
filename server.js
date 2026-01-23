@@ -55,6 +55,7 @@ if (!hasTwilio) {
 
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
+
 /* =========================
    ✅ OTP STORE + HELPERS
 ========================= */
@@ -70,6 +71,7 @@ function cleanupOtp() {
     if (!rec || rec.expMs <= t) otpStore.delete(phone);
   }
 }
+
 
 /* =========================
    ✅ COOKIE HELPERS
@@ -96,6 +98,7 @@ function setCookie(res, name, value, maxAgeSec) {
   res.setHeader("Set-Cookie", parts.join("; "));
 }
 
+
 /* =========================
    ✅ PHONE NORMALIZE (ONE VERSION ONLY)
 ========================= */
@@ -117,116 +120,6 @@ function normalizePhone(input) {
   if (d.length === 10) return "+1" + d;
 
   return null;
-}
-// =========================
-// HTML HELPERS (LOGIN + PAYWALL)
-// =========================
-
-function fmtDate(ms) {
-  try {
-    return new Date(ms).toLocaleString("en-US");
-  } catch {
-    return "-";
-  }
-}
-
-function renderLoginPage(msg = "") {
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ALGTP Login</title>
-  <style>
-    :root{color-scheme:dark}
-    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-    .box{max-width:560px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-    input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:10px;padding:12px;font-size:14px}
-    button{cursor:pointer;margin-top:10px}
-    .err{margin-top:10px;color:#ffb4b4}
-    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
-    <div class="mono">Format: 12199868683 / 2199868683 / +12199868683</div>
-    ${msg ? `<div class="err">${msg}</div>` : ""}
-
-    <input id="phone" placeholder="Phone" />
-    <button onclick="startOtp()">Send OTP</button>
-
-    <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
-    <button onclick="verifyOtp()">Verify</button>
-  </div>
-
-  <script>
-    async function startOtp(){
-      const phone = document.getElementById("phone").value.trim();
-      const r = await fetch("/auth/start", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ phone })
-      });
-      const d = await r.json();
-      if(!d.ok) alert("Error: " + (d.error||"failed"));
-      else alert("OTP sent");
-    }
-
-    async function verifyOtp(){
-      const phone = document.getElementById("phone").value.trim();
-      const otp = document.getElementById("otp").value.trim();
-      const r = await fetch("/auth/verify", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ phone, otp })
-      });
-      const d = await r.json();
-      if(!d.ok) alert("Error: " + (d.error||"failed"));
-      else location.href="/ui";
-    }
-  </script>
-</body>
-</html>`;
-}
-
-function renderPaywallPage(access) {
-  access = access || {};
-  const user = access.user || {};
-  const trialEnd = user.trial_end ? fmtDate(user.trial_end) : "-";
-
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ALGTP Access</title>
-  <style>
-    :root{color-scheme:dark}
-    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-    .box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-    a{text-decoration:none}
-    .btn{background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;margin-right:10px;display:inline-block}
-    .btn:hover{border-color:rgba(255,255,255,.28)}
-    .muted{opacity:.85;line-height:1.7}
-    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h2 style="margin:0 0 8px;">⛔ Trial expired / Access blocked</h2>
-    <div class="muted">
-      Trial <b>${TRIAL_DAYS} ngày</b> đã hết hạn<br/>
-      Trial end: <span class="mono">${trialEnd}</span><br/><br/>
-      Vui lòng mua <b>Plan ${PAID_DAYS} ngày</b> để mở lại.
-    </div>
-    <div style="margin-top:14px;">
-      <a class="btn" href="/pricing">Pay (Stripe)</a>
-      <a class="btn" href="/login">Login</a>
-    </div>
-  </div>
-</body>
-</html>`;
 }
 
 
@@ -292,7 +185,7 @@ function grantPaid30Days(phone, source = "STRIPE") {
     };
   } else {
     const curPaidEnd = Number(users[phone].paid_end || 0);
-    const base = curPaidEnd > now ? curPaidEnd : now; // còn hạn thì cộng dồn
+    const base = curPaidEnd > now ? curPaidEnd : now;
     users[phone].paid_start = users[phone].paid_start || now;
     users[phone].paid_end = base + dayMs(PAID_DAYS);
     users[phone].source = source;
@@ -315,163 +208,104 @@ function getAccess(phone) {
   return { ok: false, reason: "EXPIRED", user: u };
 }
 
-function fmtDate(ms) {
-  try { return new Date(ms).toLocaleString("en-US"); } catch { return String(ms); }
-}
-
-
 
 /* =========================
-   ✅ PUBLIC ROUTES: login / pricing / stripe webhook
+   ✅ HTML HELPERS (LOGIN + PAYWALL)
 ========================= */
-app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
-app.get("/health", (req, res) => res.json({ ok: true }));
+function fmtDate(ms) {
+  try { return new Date(ms).toLocaleString("en-US"); }
+  catch { return "-"; }
+}
 
-app.post("/auth/start", async (req, res) => {
-  try {
-    cleanupOtp();
-    if (!hasTwilio) return res.status(500).json({ ok: false, error: "Twilio env missing" });
-
-    const phone = normalizePhone(req.body?.phone);
-    if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
-
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
-    otpStore.set(phone, { otp, expMs: nowMs() + OTP_TTL_SEC * 1000 });
-
-    await tw.messages.create({
-      from: TWILIO_FROM,
-      to: phone,
-      body: `ALGTP OTP: ${otp} (exp ${Math.round(OTP_TTL_SEC / 60)}m)`,
-    });
-
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "send_failed", detail: String(e?.message || e) });
-  }
-});
-
-app.post("/auth/verify", (req, res) => {
-  cleanupOtp();
-
-  const phone = normalizePhone(req.body?.phone);
-  const otp = String(req.body?.otp || "").trim();
-
-  if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
-  if (!/^\d{6}$/.test(otp)) return res.status(400).json({ ok: false, error: "OTP must be 6 digits" });
-
-  const rec = otpStore.get(phone);
-  if (!rec) return res.status(401).json({ ok: false, error: "OTP expired/not found" });
-  if (rec.expMs <= nowMs()) {
-    otpStore.delete(phone);
-    return res.status(401).json({ ok: false, error: "OTP expired" });
-  }
-  if (rec.otp !== otp) return res.status(401).json({ ok: false, error: "OTP wrong" });
-
-  otpStore.delete(phone);
-
-  // ✅ create trial once
-  ensureUserTrial(phone);
-
-  // ✅ login cookie store phone (NO token)
-  setCookie(res, "algtp_phone", phone, 7 * 24 * 3600);
-
-  res.json({ ok: true });
-});
-
-app.post("/logout", (req, res) => {
-  setCookie(res, "algtp_phone", "", 0);
-  res.json({ ok: true });
-});
-
-// Pricing page
-app.get("/pricing", (req, res) => {
-  const cookies = parseCookie(req);
-  const phone = cookies.algtp_phone || "";
-
-  res.type("html").send(`<!doctype html><html><head>
+function renderLoginPage(msg = "") {
+  return `<!doctype html>
+<html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP Pricing</title>
+<title>ALGTP Login</title>
 <style>
 :root{color-scheme:dark}
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24px}
-.box{max-width:720px;margin:8vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-.btn{display:inline-block;background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;text-decoration:none}
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+.box{max-width:560px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:10px;padding:12px;font-size:14px}
+button{cursor:pointer;margin-top:10px}
+.err{margin-top:10px;color:#ffb4b4}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
+</style>
+</head><body>
+<div class="box">
+  <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
+  <div class="mono">Format: 12199868683 / 2199868683 / +12199868683</div>
+  ${msg ? `<div class="err">${msg}</div>` : ""}
+
+  <input id="phone" placeholder="Phone" />
+  <button onclick="startOtp()">Send OTP</button>
+
+  <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
+  <button onclick="verifyOtp()">Verify</button>
+</div>
+
+<script>
+async function startOtp(){
+  const phone = document.getElementById("phone").value.trim();
+  const r = await fetch("/auth/start", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ phone })
+  });
+  const d = await r.json();
+  if(!d.ok) alert("Error: " + (d.error||"failed"));
+  else alert("OTP sent");
+}
+async function verifyOtp(){
+  const phone = document.getElementById("phone").value.trim();
+  const otp = document.getElementById("otp").value.trim();
+  const r = await fetch("/auth/verify", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ phone, otp })
+  });
+  const d = await r.json();
+  if(!d.ok) alert("Error: " + (d.error||"failed"));
+  else location.href="/ui";
+}
+</script>
+</body></html>`;
+}
+
+function renderPaywallPage(access) {
+  access = access || {};
+  const user = access.user || {};
+  const trialEnd = user.trial_end ? fmtDate(user.trial_end) : "-";
+
+  return `<!doctype html>
+<html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP Access</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+.box{max-width:720px;margin:10vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+a{text-decoration:none}
+.btn{background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;margin-right:10px;display:inline-block}
 .btn:hover{border-color:rgba(255,255,255,.28)}
 .muted{opacity:.85;line-height:1.7}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75}
-</style></head><body>
+</style>
+</head><body>
 <div class="box">
-  <h2 style="margin:0 0 8px;">ALGTP Plan</h2>
+  <h2 style="margin:0 0 8px;">⛔ Trial expired / Access blocked</h2>
   <div class="muted">
-    Plan <b>${PAID_DAYS} days</b> (Stripe only).<br/>
-    Login phone: <span class="mono">${phone || "-"}</span><br/>
-    *Bạn cần login OTP trước khi pay để hệ thống gắn payment đúng số phone.
+    Trial <b>${TRIAL_DAYS} ngày</b> đã hết hạn<br/>
+    Trial end: <span class="mono">${trialEnd}</span><br/><br/>
+    Vui lòng mua <b>Plan ${PAID_DAYS} ngày</b> để mở lại.
   </div>
   <div style="margin-top:14px;">
-    <a class="btn" href="/pay/stripe">Pay with Stripe</a>
-    <a class="btn" href="/ui" style="margin-left:8px;">Back</a>
+    <a class="btn" href="/pricing">Pay (Stripe)</a>
+    <a class="btn" href="/login">Login</a>
   </div>
 </div>
-</body></html>`);
-});
-
-// Redirect to Stripe with phone in client_reference_id
-app.get("/pay/stripe", (req, res) => {
-  const cookies = parseCookie(req);
-  const phone = cookies.algtp_phone;
-
-  if (!phone) return res.status(401).type("html").send(renderLoginPage("Please login first"));
-
-  const url = STRIPE_PAYMENT_LINK + "?client_reference_id=" + encodeURIComponent(phone);
-  return res.redirect(302, url);
-});
-
-// Stripe webhook (minimal - no signature verify)
-app.post("/webhook/stripe", (req, res) => {
-  try {
-    const evt = req.body;
-    const session = evt?.data?.object;
-    const phone = normalizePhone(session?.client_reference_id);
-
-    if (!phone) return res.status(200).json({ ok: true, skipped: "no_phone" });
-
-    grantPaid30Days(phone, "STRIPE");
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-/* =========================
-   ✅ GUARD: block ALL /ui* /list /scan when expired
-   - Put BEFORE your /ui /list /scan routes (you will paste them below)
-========================= */
-app.use((req, res, next) => {
-  const p = req.path || "";
-
-  const needsGate =
-    p === "/ui" ||
-    p.startsWith("/ui/") ||
-    p === "/list" ||
-    p === "/scan";
-
-  if (!needsGate) return next();
-
-  const cookies = parseCookie(req);
-  const phone = cookies.algtp_phone;
-
-  if (!phone) {
-    return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
-  }
-
-  ensureUserTrial(phone);
-
-  const access = getAccess(phone);
-  if (access.ok) return next();
-
-  return res.status(402).type("html").send(renderPaywallPage(access));
-});
-
+</body></html>`;
+}
 
 
 

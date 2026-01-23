@@ -1,28 +1,23 @@
-// server.js
 try { require("dotenv").config(); } catch (_) {}
 
 const express = require("express");
-const { clerkMiddleware, requireAuth, getAuth } = require("@clerk/express");
+const { clerkMiddleware } = require("@clerk/express");
 
 const app = express();
 app.use(express.json());
-
-// Nếu chạy sau proxy (Render) và bạn dùng cookie secure sau này:
-// app.set("trust proxy", 1);
 
 const PORT = Number(process.env.PORT || 3000);
 
 const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
 const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
 
-if (!CLERK_PUBLISHABLE_KEY || !CLERK_SECRET_KEY) {
-  console.log("❌ Missing CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY");
+if (!CLERK_SECRET_KEY) {
+  console.log("❌ Missing CLERK_SECRET_KEY");
 } else {
   console.log("✅ Clerk enabled");
+  app.use(clerkMiddleware());
 }
 
-// Clerk middleware (phải mount sớm)
-app.use(clerkMiddleware());
 
 // -------- Pages --------
 function renderLoginPageClerk() {

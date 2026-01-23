@@ -23,6 +23,23 @@ const path = require("path");
 const app = express();
 app.use(express.json());
 
+npm i @clerk/express
+// =========================
+// AUTH (CLERK) — GOOGLE / FACEBOOK
+// =========================
+const { clerkMiddleware, getAuth } = require("@clerk/express");
+
+const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
+const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
+
+const hasClerk = Boolean(CLERK_PUBLISHABLE_KEY && CLERK_SECRET_KEY);
+
+if (!hasClerk) {
+  console.log("⚠️ Clerk disabled. Missing CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY");
+} else {
+  console.log("✅ Clerk enabled (Google / Facebook)");
+  app.use(clerkMiddleware()); // IMPORTANT: after express.json
+}
 // =========================
 // BASIC
 // =========================
@@ -143,142 +160,45 @@ function fmtDate(ms) {
   }
 }
 
-function renderLoginPage(msg = "") {
+function renderLoginPageClerk() {
+  if (!CLERK_PUBLISHABLE_KEY) return "<h2>Clerk not configured</h2>";
+
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>ALGTP Login</title>
+
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="${CLERK_PUBLISHABLE_KEY}"
+    src="https://js.clerk.com/v4/clerk.browser.js">
+  </script>
+
   <style>
     :root{color-scheme:dark}
-    body{
-      margin:0;
-      background:#0b0d12;
-      color:#e6e8ef;
-      font-family:system-ui,-apple-system,BlinkMacSystemFont;
-    }
-    .box{
-      max-width:560px;
-      margin:10vh auto;
-      padding:24px;
-      border-radius:18px;
-      border:1px solid rgba(255,255,255,.14);
-      background:rgba(18,24,43,.55);
-      box-shadow:0 20px 40px rgba(0,0,0,.45);
-    }
-    .logo{
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      gap:10px;
-      margin-bottom:18px;
-    }
-    .logo-text{
-      font-size:22px;
-      font-weight:800;
-      letter-spacing:.6px;
-      background:linear-gradient(90deg,#4fd1ff,#8b7cff,#ff7ad9);
-      -webkit-background-clip:text;
-      -webkit-text-fill-color:transparent;
-    }
-    .logo-sub{
-      text-align:center;
-      font-size:12px;
-      opacity:.75;
-      margin-top:2px;
-      letter-spacing:.4px;
-    }
-    input,button{
-      width:100%;
-      box-sizing:border-box;
-      background:#121622;
-      border:1px solid rgba(255,255,255,.12);
-      color:#e6e8ef;
-      border-radius:12px;
-      padding:12px;
-      font-size:14px;
-    }
-    button{
-      cursor:pointer;
-      margin-top:10px;
-      font-weight:600;
-    }
-    button:hover{
-      border-color:rgba(255,255,255,.28);
-    }
-    .err{
-      margin-top:10px;
-      color:#ffb4b4;
-      font-size:13px;
-    }
-    .mono{
-      font-family:ui-monospace,Menlo,monospace;
-      font-size:12px;
-      opacity:.75;
-      text-align:center;
-      margin-bottom:8px;
-    }
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
   </style>
 </head>
 <body>
   <div class="box">
-
-    <!-- LOGO -->
-    <div class="logo">
-      <!-- Rocket SVG -->
-      <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
-        <path d="M14 3C9.5 3 6 7.5 6 12v2l-2 2 4-1 2 4 2-2h2c4.5 0 9-3.5 9-8S18.5 3 14 3z"
-          stroke="#8b7cff" stroke-width="1.4" fill="none"/>
-        <circle cx="14" cy="9" r="2" stroke="#4fd1ff" stroke-width="1.4"/>
-      </svg>
-
-      <div>
-        <div class="logo-text">ALGTP™</div>
-        <div class="logo-sub">Algorithmic Trading Platform Scanner</div>
-      </div>
-    </div>
-
-    <h2 style="margin:0 0 10px;text-align:center;">🔐 Login (SMS OTP)</h2>
-    <div class="mono">Format: 12199868683 · 2199868683 · +12199868683</div>
-    ${msg ? `<div class="err">${msg}</div>` : ""}
-
-    <input id="phone" placeholder="Phone number" />
-    <button onclick="startOtp()">Send OTP</button>
-
-    <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
-    <button onclick="verifyOtp()">Verify</button>
+    <h2 style="text-align:center;margin-bottom:14px;">🔐 Login with Google / Facebook</h2>
+    <div id="clerk-signin"></div>
   </div>
 
   <script>
-    async function startOtp(){
-      const phone=document.getElementById("phone").value.trim();
-      const r=await fetch("/auth/start",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({phone})
+    window.addEventListener("load", async () => {
+      await Clerk.load();
+      Clerk.mountSignIn(document.getElementById("clerk-signin"), {
+        afterSignInUrl: "/ui",
+        afterSignUpUrl: "/ui"
       });
-      const d=await r.json();
-      if(!d.ok) alert(d.error||"failed");
-      else alert("OTP sent");
-    }
-    async function verifyOtp(){
-      const phone=document.getElementById("phone").value.trim();
-      const otp=document.getElementById("otp").value.trim();
-      const r=await fetch("/auth/verify",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({phone,otp})
-      });
-      const d=await r.json();
-      if(!d.ok) alert(d.error||"failed");
-      else location.href="/ui";
-    }
+    });
   </script>
 </body>
 </html>`;
 }
-
 
 
 // =========================
@@ -386,7 +306,11 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
+app.get("/login", (req, res) => {
+  if (hasClerk) return res.type("html").send(renderLoginPageClerk());
+  return res.type("html").send(renderLoginPage()); // fallback OTP
+});
+
 
 // =========================
 // AUTH ROUTES (OTP)
@@ -521,12 +445,20 @@ app.use((req, res, next) => {
 
   if (!needsGate) return next();
 
-  const cookies = parseCookie(req);
-  const phone = cookies.algtp_phone;
+ const { userId } = hasClerk ? getAuth(req) : { userId: null };
+if (userId) {
+  // NOTE: bạn nên đổi trial/paid key sang userId (khuyến nghị)
+  ensureUserTrial(userId);
+  const access = getAccess(userId);
+  if (access.ok) return next();
+  return res.status(402).type("html").send(renderPaywallPage(access));
+}
 
-  if (!phone) {
-    return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
-  }
+// fallback OTP cookie (giữ như cũ)
+const cookies = parseCookie(req);
+const phone = cookies.algtp_phone;
+if (!phone) return res.status(401).type("html").send(renderLoginPage("Please login"));
+
 
   ensureUserTrial(phone);
 

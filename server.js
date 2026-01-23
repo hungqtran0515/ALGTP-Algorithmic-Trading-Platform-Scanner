@@ -521,14 +521,12 @@ app.get("/scan", (req, res) => {
   res.json({ ok: true, note: "Replace /scan with your real logic", example: "/scan?symbols=NVDA,TSLA,AAPL" });
 });
 
-
-
+// =========================
+// START
+// =========================
 app.listen(PORT, () => {
-  const base = STATIC_PUBLIC_BASE || `http://localhost:${PORT}`;
-  console.log(`✅ ALGTP™ Scanner running ${base}`);
-  console.log(`🚀 UI: ${base}/ui`);
-  console.log(`🔐 Login: ${base}/login`);
-  console.log(`📩 SMS status callback: ${base}/sms-status`);
+  console.log(`✅ ALGTP™ Server running on port ${PORT}`);
+  console.log(`🚀 UI: /ui`);
+  console.log(`🔐 Login: /login`);
+  console.log(`🔎 Scan: /scan?symbols=NVDA,TSLA,AAPL`);
 });
-
-

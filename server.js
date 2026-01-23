@@ -1,16 +1,12 @@
 /**
- * server.js — ALGTP™ Algorithmic Trading Platform Scanner
- * (Full Build: Multi-Page UI + Alerts + Auto Refresh + Symbol Scanning + SMS OTP Login)
+ * server.js — ALGTP™ – Algorithmic Trading Platform Scanner (FULL + Multi-Page UI + Alerts + Auto Refresh + Scan Symbols)
  *
- * Features
- * - Single unified list (no S05/S04 sections)
+ * Features:
+ * - Single list (no S05/S04 sections)
  * - Groups: topGainers | topLosers | topGappers
- * - Filters:
- *    - cap = all | small | mid | big
- *    - minGap (for gappers)
- * - Adds Float + Market Cap (auto-detect if present in snapshot)
- *
- * UI Pages
+ * - Filters: cap=all|small|mid|big, minGap (for gappers)
+ * - Adds: Float + MarketCap (auto-detect if present in snapshot)
+ * - UI Pages:
  *    /ui            (dashboard)
  *    /ui/gainers    (preset)
  *    /ui/losers     (preset)
@@ -19,22 +15,17 @@
  *    /ui/midcap     (preset cap=mid)
  *    /ui/bigcap     (preset cap=big)
  *
- * Alerts (UI)
- * - Sound + Desktop notifications
- * - Anti-spam: one alert per symbol per session
+ * - Alerts (UI):
+ *    Sound + Desktop notifications (anti-spam per symbol per session)
+ * - Auto Refresh (UI):
+ *    Toggle + interval seconds, refreshes current mode (Group scan or Symbols scan)
+ * - Symbols Scan:
+ *    GET /scan?symbols=NVDA,TSLA,AAPL
  *
- * Auto Refresh (UI)
- * - Toggle + interval (seconds)
- * - Refreshes the current mode (Group scan or Symbols scan)
- *
- * Symbols Scan
- * - GET /scan?symbols=NVDA,TSLA,AAPL
- *
- * ✅ Minimal SMS OTP Login
- * - Routes: /login, /auth/start, /auth/verify
- * - Guarded endpoints: /ui* + /list + /scan
- * - SMS provider: Twilio
- * - Delivery status callback: /sms-status (logs status + error details)
+ * - ✅ SMS OTP Login (minimal)
+ *    /login, /auth/start, /auth/verify
+ *    Guard: /ui* + /list + /scan
+ *    Twilio delivery status callback: /sms-status (logs)
  */
 
 require("dotenv").config();
@@ -48,8 +39,8 @@ app.use(express.json());
 
 /* =========================
    ✅ MINIMAL SMS OTP LOGIN (ONLY)
-   - After verification: sets cookie algtp_login=1
-   - Guards only: /ui* + /list + /scan
+   - After verify: set cookie algtp_login=1
+   - Guard only: /ui* + /list + /scan
    - SMS provider: Twilio
    - Status Callback: /sms-status
 ========================= */
@@ -57,21 +48,21 @@ app.use(express.json());
 // Twilio ENV
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
-const TWILIO_FROM = String(process.env.TWILIO_FROM || "").trim(); // e.g. "+1xxxxxxxxxx"
+const TWILIO_FROM = String(process.env.TWILIO_FROM || "").trim(); // ex: "+1xxxxxxxxxx"
 
 // TTL
-const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // 5 minutes default
+const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // 5 min
 
-// Cookie secure recommended on Render (HTTPS)
+// Cookie secure recommended on Render (https)
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "true").toLowerCase() === "true";
 
-// Public base URL (Render often sets RENDER_EXTERNAL_URL; fallback at runtime)
+// Public base url (Render sets RENDER_EXTERNAL_URL on many setups; fallback at runtime)
 const STATIC_PUBLIC_BASE = String(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").trim();
 
 const hasTwilio = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM;
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
-// Store OTP in memory: phone -> { otp, expMs }
+// store OTP in memory: phone -> { otp, expMs }
 const otpStore = new Map();
 
 function nowMs() {
@@ -108,7 +99,7 @@ function normalizePhone(input) {
   let s = String(input || "").trim();
   if (!s) return null;
 
-  // remove spaces/dashes/parentheses
+  // remove spaces/dashes/()
   s = s.replace(/[^\d+]/g, "");
 
   // +1xxxxxxxxxx
@@ -145,17 +136,17 @@ button{cursor:pointer;margin-top:10px}
 </head><body>
 <div class="box">
   <h2 style="margin:0 0 10px;">🔐 Login (SMS OTP)</h2>
-  <div class="muted">Access requires SMS OTP verification. The scanner functionality remains unchanged.</div>
+  <div class="muted">Chỉ SMS OTP verify là vào được. Scanner giữ nguyên.</div>
   <div class="mono" style="margin-top:8px;">Format: 12199868683 / 2199868683 / +12199868683</div>
   ${msg ? `<div class="err">${msg}</div>` : ""}
 
-  <input id="phone" placeholder="Phone number" />
+  <input id="phone" placeholder="Phone" />
   <button onclick="startOtp()">Send OTP</button>
 
-  <input id="otp" placeholder="6-digit OTP" style="margin-top:12px;" />
+  <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
   <button onclick="verifyOtp()">Verify</button>
 
-  <div class="muted" style="margin-top:12px;">After verification, you will be redirected to <span class="mono">/ui</span>.</div>
+  <div class="muted" style="margin-top:12px;">Sau verify: tự chuyển qua <span class="mono">/ui</span></div>
 </div>
 
 <script>
@@ -168,7 +159,7 @@ async function startOtp(){
   });
   const d = await r.json();
   if(!d.ok) alert("Error: " + (d.detail || d.error || "failed"));
-  else alert("OTP sent. Please check your phone.");
+  else alert("OTP sent (check your phone)");
 }
 async function verifyOtp(){
   const phone = document.getElementById("phone").value.trim();
@@ -191,8 +182,8 @@ app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
 
 /**
  * ✅ Twilio SMS delivery status callback
- * Twilio will POST form-urlencoded fields (MessageSid, MessageStatus, ErrorCode, etc.)
- * This endpoint must be publicly accessible and must NOT be behind auth.
+ * Twilio will POST form-urlencoded fields (MessageSid, MessageStatus, ErrorCode...)
+ * This endpoint must be publicly accessible and not blocked by auth.
  */
 app.post("/sms-status", express.urlencoded({ extended: false }), (req, res) => {
   console.log("📩 SMS STATUS:", {
@@ -221,14 +212,14 @@ app.post("/auth/start", async (req, res) => {
     if (!hasTwilio) return res.status(500).json({ ok: false, error: "Twilio env missing" });
 
     const phone = normalizePhone(req.body?.phone);
-    if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone number" });
+    if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
 
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     otpStore.set(phone, { otp, expMs: nowMs() + OTP_TTL_SEC * 1000 });
 
     const base = getPublicBaseUrl(req);
 
-    // ✅ Carrier-friendly message (avoid branding/emoji/links while testing)
+    // ✅ carrier-friendly message (avoid brand/emoji/links while testing)
     await tw.messages.create({
       from: TWILIO_FROM,
       to: phone,
@@ -255,16 +246,16 @@ app.post("/auth/verify", (req, res) => {
   const phone = normalizePhone(req.body?.phone);
   const otp = String(req.body?.otp || "").trim();
 
-  if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone number" });
+  if (!phone) return res.status(400).json({ ok: false, error: "Invalid phone" });
   if (!/^\d{6}$/.test(otp)) return res.status(400).json({ ok: false, error: "OTP must be 6 digits" });
 
   const rec = otpStore.get(phone);
-  if (!rec) return res.status(401).json({ ok: false, error: "OTP expired or not found" });
+  if (!rec) return res.status(401).json({ ok: false, error: "OTP expired/not found" });
   if (rec.expMs <= nowMs()) {
     otpStore.delete(phone);
     return res.status(401).json({ ok: false, error: "OTP expired" });
   }
-  if (rec.otp !== otp) return res.status(401).json({ ok: false, error: "Incorrect OTP" });
+  if (rec.otp !== otp) return res.status(401).json({ ok: false, error: "OTP wrong" });
 
   otpStore.delete(phone);
 
@@ -290,9 +281,8 @@ app.use((req, res, next) => {
   const cookies = parseCookie(req);
   if (cookies.algtp_login === "1") return next();
 
-  return res.status(401).type("html").send(renderLoginPage("Please log in using SMS OTP."));
+  return res.status(401).type("html").send(renderLoginPage("Please login by SMS OTP"));
 });
-
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);
@@ -319,6 +309,8 @@ function envMissing() {
   if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
   if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
   if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
+  // NOTICE(ADD): add missing env for aggs endpoint
+  if (!MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
   return miss;
 }
 
@@ -392,6 +384,17 @@ function signalIcon(d) {
   if (d >= 4) return "🔥";
   if (d >= 3) return "👀";
   return "⛔️";
+}
+
+// NOTICE(ADD): 5m VWAP/Volume/PriceAction signal icon
+function paSignalIcon(row) {
+  // price action / volume above vwap => alert + icon
+  const above = Boolean(row?.aboveVWAP_5m);
+  const volSpike = Boolean(row?.volSpike_5m);
+  if (above && volSpike) return "🚨";
+  if (above) return "✅";
+  if (volSpike) return "🔊";
+  return "";
 }
 
 // ---------------- axios safe ----------------
@@ -591,7 +594,12 @@ function normalizeSnapshotAuto(ticker, snap) {
   const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
 
   // Float
-  let floatShares = n(root?.float) ?? n(root?.freeFloat) ?? n(root?.sharesFloat) ?? n(root?.floatShares) ?? null;
+  let floatShares =
+    n(root?.float) ??
+    n(root?.freeFloat) ??
+    n(root?.sharesFloat) ??
+    n(root?.floatShares) ??
+    null;
 
   if (floatShares === null) {
     const ff = findFirstNumberByKeys(root, [
@@ -651,6 +659,7 @@ function groupToDirection(group) {
   if (group === "topLosers") return "losers";
   return "gainers";
 }
+
 function sortRowsByGroup(rows, group) {
   if (group === "topGappers") {
     rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
@@ -658,11 +667,191 @@ function sortRowsByGroup(rows, group) {
   }
   rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
 }
+
 function capPass(row, cap) {
   const c = String(cap || "all").toLowerCase();
   if (c === "all") return true;
   if (!row.cap) return false;
   return row.cap === c;
+}
+
+// -----------------------------------------------------------------------------
+// NOTICE(ADD): 5m aggregates endpoint for indicators (SMA/EMA/VWAP)
+// -----------------------------------------------------------------------------
+const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
+
+// NOTICE(ADD): indicators toggle + bars limit
+const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
+const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
+
+// NOTICE(ADD): VWAP alert thresholds (volume spike)
+const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
+const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
+
+// NOTICE(ADD): Indicators (SMA/EMA/VWAP) computed from 5m bars
+function computeSMA(closes, len) {
+  if (!Array.isArray(closes) || closes.length < len) return null;
+  let sum = 0;
+  for (let i = 0; i < len; i++) sum += closes[i];
+  return sum / len;
+}
+
+function computeEMA(closes, len) {
+  if (!Array.isArray(closes) || closes.length < len) return null;
+  const k = 2 / (len + 1);
+
+  // closes must be chronological (oldest -> newest)
+  const seed = computeSMA(closes.slice(0, len), len);
+  if (seed === null) return null;
+
+  let ema = seed;
+  for (let i = len; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+// VWAP: sum(close * volume) / sum(volume)
+function computeVWAP(closes, volumes) {
+  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length)
+    return null;
+  let pv = 0;
+  let vv = 0;
+  for (let i = 0; i < closes.length; i++) {
+    const c = n(closes[i]);
+    const v = n(volumes[i]);
+    if (c === null || v === null || v <= 0) continue;
+    pv += c * v;
+    vv += v;
+  }
+  if (vv <= 0) return null;
+  return pv / vv;
+}
+
+function computeAvg(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  let s = 0;
+  let c = 0;
+  for (const x of arr) {
+    const v = n(x);
+    if (v === null) continue;
+    s += v;
+    c += 1;
+  }
+  if (c === 0) return null;
+  return s / c;
+}
+
+function indicatorsFromAggs5m(barsDesc) {
+  // barsDesc usually newest first (sort=desc)
+  if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
+    return {
+      sma26_5m: null,
+      ema9_5m: null,
+      ema34_5m: null,
+      vwap_5m: null,
+      vwapBar_5m: null,
+      lastVol_5m: null,
+      avgVol_5m: null,
+    };
+  }
+
+  const bars = barsDesc
+    .map((b) => ({
+      c: n(b?.c ?? b?.close),
+      v: n(b?.v ?? b?.volume),
+      vw: n(b?.vw), // if API provides bar vwap
+      t: n(b?.t) ?? null,
+    }))
+    .filter((x) => x.c !== null)
+    .slice(0, 400);
+
+  const barsChrono = [...bars].reverse(); // oldest -> newest
+  const closes = barsChrono.map((x) => x.c);
+  const vols = barsChrono.map((x) => x.v ?? 0);
+
+  const last26 = closes.slice(-26);
+  const sma26 = last26.length === 26 ? computeSMA(last26, 26) : null;
+
+  const ema9 = computeEMA(closes, 9);
+  const ema34 = computeEMA(closes, 34);
+
+  const vwap = computeVWAP(closes, vols);
+
+  const lastBar = barsChrono[barsChrono.length - 1] || null;
+  const vwapBar = lastBar?.vw ?? null;
+
+  const lastVol = lastBar?.v ?? null;
+  const avgVol = computeAvg(vols.slice(-VOL_AVG_LEN_5M));
+
+  return {
+    sma26_5m: sma26 !== null ? round2(sma26) : null,
+    ema9_5m: ema9 !== null ? round2(ema9) : null,
+    ema34_5m: ema34 !== null ? round2(ema34) : null,
+    vwap_5m: vwap !== null ? round2(vwap) : null,
+    vwapBar_5m: vwapBar !== null ? round2(vwapBar) : null,
+    lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
+    avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
+  };
+}
+
+// NOTICE(ADD): 5m aggregates fetch + small in-memory cache
+const aggsCache = new Map(); // key: "TICKER|5m" -> { ts, bars }
+
+function ymd(d) {
+  const x = new Date(d);
+  const yyyy = x.getFullYear();
+  const mm = String(x.getMonth() + 1).padStart(2, "0");
+  const dd = String(x.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+async function fetchAggs5m(ticker) {
+  const sym = String(ticker || "").trim().toUpperCase();
+  const cacheKey = `${sym}|5m`;
+  const now = Date.now();
+
+  // cache 25s (UI refresh default 30s)
+  const hit = aggsCache.get(cacheKey);
+  if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
+
+  const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
+
+  // window đủ cho EMA34 + SMA26 (lấy ~5 ngày)
+  const to = ymd(new Date());
+  const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
+
+  const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
+
+  const params = { adjusted: "true", sort: "desc", limit: String(AGGS_5M_LIMIT) };
+  const headers = {};
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+
+  const bars = Array.isArray(r.data?.results) ? r.data.results : [];
+  const ok = r.ok && bars.length > 0;
+
+  if (ok) aggsCache.set(cacheKey, { ts: now, bars });
+
+  return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
+}
+
+// NOTICE(ADD): derive VWAP alerts for 5m
+function attach5mSignals(row) {
+  const price = n(row?.price);
+  const vwap = n(row?.vwap_5m);
+  const lastVol = n(row?.lastVol_5m);
+  const avgVol = n(row?.avgVol_5m);
+
+  const aboveVWAP = price !== null && vwap !== null ? price > vwap : false;
+  const volSpike = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol >= avgVol * VOL_SPIKE_MULT : false;
+
+  return {
+    aboveVWAP_5m: aboveVWAP,
+    volSpike_5m: volSpike,
+    paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }),
+  };
 }
 
 // ---------------- UI ----------------
@@ -731,7 +920,7 @@ function renderUI(preset = {}) {
 <header>
   <div class="wrap">
     <h1>ALGTP™ – Algorithmic Trading Platform Scanner</h1>
-    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Alerts • Auto Refresh • Scan Symbols • Click ticker for chart</div>
+    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Alerts • Auto Refresh • Scan Symbols • Click ticker for chart • 5m SMA/EMA/VWAP</div>
 
     <div class="nav">
       <a href="/ui" style="${active("/ui")}">Dashboard</a>
@@ -789,6 +978,10 @@ function renderUI(preset = {}) {
       <input id="alertGap" placeholder="Alert gap% >= (default 20)" style="min-width:180px;" />
       <input id="alertPrice" placeholder="Alert price% >= (default 20)" style="min-width:200px;" />
 
+      <!-- NOTICE(ADD): 5m VWAP/Volume alert thresholds -->
+      <input id="alertAboveVWAP" placeholder="Alert if Price > VWAP (5m): 1/0 (default 1)" style="min-width:260px;" />
+      <input id="alertVolSpike" placeholder="Alert if VolSpike (5m): 1/0 (default 1)" style="min-width:260px;" />
+
       <button id="clearAlertsBtn">Clear Alert Memory</button>
     </div>
 
@@ -802,6 +995,7 @@ function renderUI(preset = {}) {
 
     <div class="hint">
       Click any ticker to open a TradingView chart. If a symbol does not load, switch exchange in the chart (NASDAQ/NYSE/AMEX).
+      <br/>5m indicators used: <b>SMA26</b>, <b>EMA9</b>, <b>EMA34</b>, <b>VWAP</b>. Alerts will fire when Price&gt;VWAP and/or 5m volume spike.
     </div>
 
     <div class="err" id="errBox"></div>
@@ -884,6 +1078,13 @@ function toNumOrDefault(val, def){
   const v = Number(String(val ?? "").trim());
   return Number.isFinite(v) ? v : def;
 }
+function toBool01(val, def){
+  const s = String(val ?? "").trim();
+  if (s === "") return def;
+  if (s === "1" || s.toLowerCase() === "true" || s.toLowerCase() === "yes") return true;
+  if (s === "0" || s.toLowerCase() === "false" || s.toLowerCase() === "no") return false;
+  return def;
+}
 function beep(){
   try{
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -913,16 +1114,26 @@ function getAlertCfg(){
     scoreTh: toNumOrDefault(byId("alertScore").value, 4),
     gapTh: toNumOrDefault(byId("alertGap").value, 20),
     priceTh: toNumOrDefault(byId("alertPrice").value, 20),
+    aboveVWAPOn: toBool01(byId("alertAboveVWAP").value, true),
+    volSpikeOn: toBool01(byId("alertVolSpike").value, true),
   };
 }
 function shouldAlertRow(r, cfg){
   if (!cfg.alertsOn) return false;
   if (!r || !r.symbol) return false;
   if (alerted.has(r.symbol)) return false;
+
   const score = Number(r.demandScore ?? 0);
   const gap = Number(r.gapPct ?? 0);
   const pc = Number(r.pricePct ?? 0);
-  return (score >= cfg.scoreTh) || (gap >= cfg.gapTh) || (pc >= cfg.priceTh);
+
+  const aboveVWAP = Boolean(r.aboveVWAP_5m);
+  const volSpike = Boolean(r.volSpike_5m);
+
+  const classicHit = (score >= cfg.scoreTh) || (gap >= cfg.gapTh) || (pc >= cfg.priceTh);
+  const vwapHit = (cfg.aboveVWAPOn && aboveVWAP) || (cfg.volSpikeOn && volSpike);
+
+  return classicHit || vwapHit;
 }
 function fireAlert(r, cfg){
   alerted.add(r.symbol);
@@ -931,9 +1142,18 @@ function fireAlert(r, cfg){
   if (r.gapPct != null) parts.push(\`Gap%: \${r.gapPct}%\`);
   if (r.floatM != null) parts.push(\`Float(M): \${r.floatM}\`);
   if (r.marketCapB != null) parts.push(\`MCap(B): \${r.marketCapB}\`);
+
+  // NOTICE(ADD): 5m indicators + VWAP signals in alert body
+  if (r.sma26_5m != null) parts.push(\`SMA26(5m): \${r.sma26_5m}\`);
+  if (r.ema9_5m != null) parts.push(\`EMA9(5m): \${r.ema9_5m}\`);
+  if (r.ema34_5m != null) parts.push(\`EMA34(5m): \${r.ema34_5m}\`);
+  if (r.vwap_5m != null) parts.push(\`VWAP(5m): \${r.vwap_5m}\`);
+  if (r.aboveVWAP_5m) parts.push(\`Price>VWAP ✅\`);
+  if (r.volSpike_5m) parts.push(\`VolSpike 🔊\`);
+
   const body = parts.join(" | ") || "Signal";
   if (cfg.soundOn) beep();
-  if (cfg.desktopOn) pushNotification(\`\${r.signalIcon || ""} \${r.symbol}\`, body);
+  if (cfg.desktopOn) pushNotification(\`\${r.signalIcon || ""}\${r.paIcon ? " " + r.paIcon : ""} \${r.symbol}\`, body);
 }
 function runAlerts(data){
   const cfg = getAlertCfg();
@@ -955,7 +1175,7 @@ async function enableNotifications(){
   }
 }
 
-// -------- Chart Modal --------
+// -------- Chart Modal (click ticker) --------
 const modalBack = byId("modalBack");
 const modalTitle = byId("modalTitle");
 const chartBox = byId("chartBox");
@@ -1034,6 +1254,7 @@ function renderList(data){
         <thead>
           <tr>
             <th>Icon</th>
+            <th>PA</th>
             <th>Symbol</th>
             <th class="right">Price</th>
             <th class="right">Price%</th>
@@ -1044,12 +1265,17 @@ function renderList(data){
             <th class="right">MCap(B)</th>
             <th>Cap</th>
             <th class="right">Score</th>
+            <th class="right">SMA26(5m)</th>
+            <th class="right">EMA9(5m)</th>
+            <th class="right">EMA34(5m)</th>
+            <th class="right">VWAP(5m)</th>
           </tr>
         </thead>
         <tbody>
           \${rows.map(r => \`
             <tr>
               <td>\${r.signalIcon || ""}</td>
+              <td>\${r.paIcon || ""}</td>
               <td class="mono">
                 <a class="symLink" href="javascript:void(0)" onclick="openChart('\${String(r.symbol||"").replace(/'/g,"") }')">\${r.symbol || ""}</a>
               </td>
@@ -1062,6 +1288,10 @@ function renderList(data){
               <td class="right mono">\${fmtNum(r.marketCapB)}</td>
               <td>\${r.cap || "-"}</td>
               <td class="right mono">\${r.demandScore ?? "-"}</td>
+              <td class="right mono">\${fmtNum(r.sma26_5m)}</td>
+              <td class="right mono">\${fmtNum(r.ema9_5m)}</td>
+              <td class="right mono">\${fmtNum(r.ema34_5m)}</td>
+              <td class="right mono">\${fmtNum(r.vwap_5m)}</td>
             </tr>
           \`).join("")}
         </tbody>
@@ -1146,6 +1376,9 @@ async function run(){
     if (data.snapshotErrors && data.snapshotErrors.length){
       showError({ snapshotErrors: data.snapshotErrors });
     }
+    if (data.aggsErrors && data.aggsErrors.length){
+      showError({ aggsErrors: data.aggsErrors });
+    }
   }catch(e){
     setStatus("Error");
     showError(String(e?.message || e));
@@ -1162,6 +1395,9 @@ function setPreset(){
   byId("alertScore").value = "4";
   byId("alertGap").value = "20";
   byId("alertPrice").value = "20";
+
+  byId("alertAboveVWAP").value = "1";
+  byId("alertVolSpike").value = "1";
 
   byId("autoSec").value = "30";
   countdownBadge.textContent = "-";
@@ -1231,6 +1467,13 @@ app.get("/api", (req, res) => {
       includeOtc: INCLUDE_OTC,
       snapConcurrency: SNAP_CONCURRENCY,
       debug: DEBUG,
+
+      // NOTICE(ADD)
+      aggsUrl: MASSIVE_AGGS_URL,
+      enable5mIndicators: ENABLE_5M_INDICATORS,
+      aggs5mLimit: AGGS_5M_LIMIT,
+      volSpikeMult: VOL_SPIKE_MULT,
+      volAvgLen5m: VOL_AVG_LEN_5M,
     },
   });
 });
@@ -1243,10 +1486,15 @@ app.get("/env", (req, res) => {
     queryKeyName: MASSIVE_QUERY_KEYNAME,
     moverBase: MASSIVE_MOVER_URL,
     tickerBase: MASSIVE_TICKER_SNAPSHOT_URL,
+
+    // NOTICE(ADD)
+    aggsBase: MASSIVE_AGGS_URL,
+    enable5mIndicators: ENABLE_5M_INDICATORS,
+    aggs5mLimit: AGGS_5M_LIMIT,
   });
 });
 
-// Symbols scan endpoint
+// Symbols scan endpoint (for TSLA/NVDA anytime)
 app.get("/scan", async (req, res) => {
   try {
     const miss = envMissing();
@@ -1263,14 +1511,46 @@ app.get("/scan", async (req, res) => {
     const bad = snaps.filter((x) => !x.ok);
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+
+    // NOTICE(REPLACE+ADD): attach 5m indicators (SMA26/EMA9/EMA34/VWAP)
+    const aggsErrors = [];
+    if (ENABLE_5M_INDICATORS) {
+      const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
+        const a = await fetchAggs5m(r.symbol);
+        if (!a.ok) {
+          aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
+          return {
+            symbol: r.symbol,
+            __aggsOk: false,
+            __aggsErr: a.errorDetail || { status: a.status, url: a.url },
+            sma26_5m: null,
+            ema9_5m: null,
+            ema34_5m: null,
+            vwap_5m: null,
+            vwapBar_5m: null,
+            lastVol_5m: null,
+            avgVol_5m: null,
+          };
+        }
+        const ii = indicatorsFromAggs5m(a.bars);
+        return { symbol: r.symbol, __aggsOk: true, ...ii };
+      });
+
+      const mapInd = new Map(ind.map((x) => [x.symbol, x]));
+      rows = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
+      rows = rows.map((r) => ({ ...r, ...attach5mSignals(r) }));
+    }
+
     rows = rows.map((r) => {
       const d = demandScore(r);
-      return { ...r, demandScore: d, signalIcon: signalIcon(d) };
+      return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
     });
 
     rows.sort(
       (a, b) =>
-        (b.demandScore ?? 0) - (a.demandScore ?? 0) || Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
+        (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
+        (b.aboveVWAP_5m === true) - (a.aboveVWAP_5m === true) ||
+        Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
     );
 
     res.json({
@@ -1280,6 +1560,7 @@ app.get("/scan", async (req, res) => {
       snapshotErrors: DEBUG
         ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
         : undefined,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: "Scan failed", detail: String(e?.message || e) });
@@ -1315,9 +1596,39 @@ app.get("/list", async (req, res) => {
     const bad = snaps.filter((x) => !x.ok);
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+
+    // NOTICE(REPLACE+ADD): attach 5m indicators (SMA26/EMA9/EMA34/VWAP)
+    const aggsErrors = [];
+    if (ENABLE_5M_INDICATORS) {
+      const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
+        const a = await fetchAggs5m(r.symbol);
+        if (!a.ok) {
+          aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
+          return {
+            symbol: r.symbol,
+            __aggsOk: false,
+            __aggsErr: a.errorDetail || { status: a.status, url: a.url },
+            sma26_5m: null,
+            ema9_5m: null,
+            ema34_5m: null,
+            vwap_5m: null,
+            vwapBar_5m: null,
+            lastVol_5m: null,
+            avgVol_5m: null,
+          };
+        }
+        const ii = indicatorsFromAggs5m(a.bars);
+        return { symbol: r.symbol, __aggsOk: true, ...ii };
+      });
+
+      const mapInd = new Map(ind.map((x) => [x.symbol, x]));
+      rows = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
+      rows = rows.map((r) => ({ ...r, ...attach5mSignals(r) }));
+    }
+
     rows = rows.map((r) => {
       const d = demandScore(r);
-      return { ...r, demandScore: d, signalIcon: signalIcon(d) };
+      return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
     });
 
     rows = rows.filter((r) => capPass(r, cap));
@@ -1338,6 +1649,7 @@ app.get("/list", async (req, res) => {
       snapshotErrors: DEBUG
         ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
         : undefined,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: "List failed", detail: String(e?.message || e) });
@@ -1345,9 +1657,7 @@ app.get("/list", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  const base = STATIC_PUBLIC_BASE || `http://localhost:${PORT}`;
-  console.log(`✅ ALGTP™ Scanner running ${base}`);
-  console.log(`🚀 UI: ${base}/ui`);
-  console.log(`🔐 Login: ${base}/login`);
-  console.log(`📩 SMS status callback: ${base}/sms-status`);
+  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
+  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
+  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
 });

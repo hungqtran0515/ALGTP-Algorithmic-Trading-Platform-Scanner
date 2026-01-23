@@ -6,13 +6,18 @@
 // - Works on Render + Custom domain
 // =========================
 
-// dotenv is OPTIONAL on Render (Render already provides ENV)
-// but useful when running locally
+// =========================
+// ALGTP SERVER (CLEAN BUILD)
+// - Clerk Google/Facebook (primary)
+// - Twilio OTP (fallback)
+// - Trial/Paid gate (users.json)
+// - Works on Render
+// =========================
+
+// dotenv OPTIONAL on Render (Render already provides ENV)
 try {
   require("dotenv").config();
-} catch (_) {
-  // ignore if dotenv not installed
-}
+} catch (_) {}
 
 const express = require("express");
 const axios = require("axios");
@@ -20,15 +25,24 @@ const twilio = require("twilio");
 const fs = require("fs");
 const path = require("path");
 
+// IMPORTANT: install with terminal (NOT inside code):
+// npm i @clerk/express
+const { clerkMiddleware, getAuth } = require("@clerk/express");
+
 const app = express();
 app.use(express.json());
 
-npm i @clerk/express
+// If you are behind Render/Proxy and later use secure cookies:
+// app.set("trust proxy", 1);
+
+// =========================
+// BASIC
+// =========================
+const PORT = Number(process.env.PORT || 3000);
+
 // =========================
 // AUTH (CLERK) — GOOGLE / FACEBOOK
 // =========================
-const { clerkMiddleware, getAuth } = require("@clerk/express");
-
 const CLERK_PUBLISHABLE_KEY = String(process.env.CLERK_PUBLISHABLE_KEY || "").trim();
 const CLERK_SECRET_KEY = String(process.env.CLERK_SECRET_KEY || "").trim();
 
@@ -38,25 +52,21 @@ if (!hasClerk) {
   console.log("⚠️ Clerk disabled. Missing CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY");
 } else {
   console.log("✅ Clerk enabled (Google / Facebook)");
-  app.use(clerkMiddleware()); // IMPORTANT: after express.json
+  // Must be AFTER express.json()
+  app.use(clerkMiddleware());
 }
-// =========================
-// BASIC
-// =========================
-const PORT = Number(process.env.PORT || 3000); // ✅ declare ONCE only
 
 // =========================
-// OTP (Twilio) ENV — CLEAN (ONE COPY)
+// OTP (Twilio) ENV — FALLBACK
 // =========================
 const TWILIO_ACCOUNT_SID = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
 const TWILIO_AUTH_TOKEN = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
 
-// Render UI hay bị copy có space -> strip hết chỉ giữ + và digits
 const TWILIO_FROM = String(process.env.TWILIO_FROM || "")
   .trim()
-  .replace(/[^\d+]/g, ""); // "+1 708 578 5219" -> "+17085785219"
+  .replace(/[^\d+]/g, "");
 
-const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300)); // default 5 minutes
+const OTP_TTL_SEC = Math.max(60, Number(process.env.OTP_TTL_SEC || 300));
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "false").toLowerCase() === "true";
 
 function isE164(s) {
@@ -84,7 +94,7 @@ if (!hasTwilio) {
 const tw = hasTwilio ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
 // =========================
-// OTP STORE + HELPERS
+// OTP STORE + HELPERS (RAM)
 // =========================
 const otpStore = new Map(); // phone -> { otp, expMs }
 
@@ -125,15 +135,13 @@ function setCookie(res, name, value, maxAgeSec) {
 }
 
 // =========================
-// PHONE NORMALIZE (ONE VERSION ONLY)
-// US -> E.164 (+1...)
-// Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
+// PHONE NORMALIZE (US -> E.164)
 // =========================
 function normalizePhone(input) {
   let s = String(input || "").trim();
   if (!s) return null;
 
-  s = s.replace(/[^\d+]/g, ""); // keep only + and digits
+  s = s.replace(/[^\d+]/g, "");
 
   if (s.startsWith("+")) {
     const d = s.slice(1).replace(/\D/g, "");
@@ -160,6 +168,7 @@ function fmtDate(ms) {
   }
 }
 
+// Clerk login page (Google/Facebook)
 function renderLoginPageClerk() {
   if (!CLERK_PUBLISHABLE_KEY) return "<h2>Clerk not configured</h2>";
 
@@ -179,12 +188,14 @@ function renderLoginPageClerk() {
     :root{color-scheme:dark}
     body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
     .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    .muted{opacity:.8;font-size:12px;margin-top:10px;text-align:center}
   </style>
 </head>
 <body>
   <div class="box">
-    <h2 style="text-align:center;margin-bottom:14px;">🔐 Login with Google / Facebook</h2>
+    <h2 style="text-align:center;margin:0 0 14px;">🔐 Login with Google / Facebook</h2>
     <div id="clerk-signin"></div>
+    <div class="muted">After sign-in you will be redirected to /ui</div>
   </div>
 
   <script>
@@ -200,9 +211,97 @@ function renderLoginPageClerk() {
 </html>`;
 }
 
+// OTP login page (fallback)
+function renderLoginPage(msg = "") {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP Login</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    input,button{width:100%;box-sizing:border-box;background:#121622;border:1px solid rgba(255,255,255,.12);color:#e6e8ef;border-radius:12px;padding:12px;font-size:14px}
+    button{cursor:pointer;margin-top:10px;font-weight:600}
+    .err{margin-top:10px;color:#ffb4b4;font-size:13px}
+    .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;opacity:.75;text-align:center;margin-bottom:8px}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2 style="margin:0 0 10px;text-align:center;">🔐 Login (SMS OTP)</h2>
+    <div class="mono">Format: 12199868683 · 2199868683 · +12199868683</div>
+    ${msg ? `<div class="err">${msg}</div>` : ""}
+
+    <input id="phone" placeholder="Phone number" />
+    <button onclick="startOtp()">Send OTP</button>
+
+    <input id="otp" placeholder="OTP 6 digits" style="margin-top:12px;" />
+    <button onclick="verifyOtp()">Verify</button>
+  </div>
+
+  <script>
+    async function startOtp(){
+      const phone=document.getElementById("phone").value.trim();
+      const r=await fetch("/auth/start",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({phone})
+      });
+      const d=await r.json();
+      if(!d.ok) alert(d.error||"failed");
+      else alert("OTP sent");
+    }
+    async function verifyOtp(){
+      const phone=document.getElementById("phone").value.trim();
+      const otp=document.getElementById("otp").value.trim();
+      const r=await fetch("/auth/verify",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({phone,otp})
+      });
+      const d=await r.json();
+      if(!d.ok) alert(d.error||"failed");
+      else location.href="/ui";
+    }
+  </script>
+</body>
+</html>`;
+}
+
+function renderPaywallPage(access) {
+  const until = access?.until || access?.user?.paid_end || access?.user?.trial_end || 0;
+
+  return `<!doctype html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP Paywall</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24px}
+.box{max-width:720px;margin:8vh auto;padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+.btn{display:inline-block;background:#121622;border:1px solid rgba(255,255,255,.16);color:#e6e8ef;border-radius:10px;padding:10px 12px;text-decoration:none}
+.btn:hover{border-color:rgba(255,255,255,.28)}
+.muted{opacity:.85;line-height:1.7}
+</style></head><body>
+<div class="box">
+  <h2 style="margin:0 0 8px;">⛔ Access Locked</h2>
+  <div class="muted">
+    Reason: <b>${access?.reason || "EXPIRED"}</b><br/>
+    Expired at: <b>${fmtDate(until)}</b>
+  </div>
+  <div style="margin-top:14px;">
+    <a class="btn" href="/pricing">View Pricing</a>
+    <a class="btn" href="/login" style="margin-left:8px;">Login</a>
+  </div>
+</div>
+</body></html>`;
+}
 
 // =========================
 // TRIAL + PAID STORE (users.json)
+// NOTE: currently keyed by "phone OR clerk userId"
 // =========================
 const USERS_FILE = process.env.USERS_FILE || path.join(__dirname, "users.json");
 const TRIAL_DAYS = Math.max(1, Number(process.env.TRIAL_DAYS || 14));
@@ -233,12 +332,12 @@ function saveUsers(obj) {
   fs.renameSync(tmp, USERS_FILE);
 }
 
-function ensureUserTrial(phone) {
+function ensureUserTrial(key) {
   const users = loadUsers();
   const now = Date.now();
 
-  if (!users[phone]) {
-    users[phone] = {
+  if (!users[key]) {
+    users[key] = {
       trial_start: now,
       trial_end: now + dayMs(TRIAL_DAYS),
       paid_start: 0,
@@ -248,15 +347,15 @@ function ensureUserTrial(phone) {
     };
     saveUsers(users);
   }
-  return users[phone];
+  return users[key];
 }
 
-function grantPaid30Days(phone, source = "STRIPE") {
+function grantPaid30Days(key, source = "STRIPE") {
   const users = loadUsers();
   const now = Date.now();
 
-  if (!users[phone]) {
-    users[phone] = {
+  if (!users[key]) {
+    users[key] = {
       trial_start: now,
       trial_end: now + dayMs(TRIAL_DAYS),
       paid_start: now,
@@ -265,42 +364,39 @@ function grantPaid30Days(phone, source = "STRIPE") {
       updated_at: now,
     };
   } else {
-    const curPaidEnd = Number(users[phone].paid_end || 0);
+    const curPaidEnd = Number(users[key].paid_end || 0);
     const base = curPaidEnd > now ? curPaidEnd : now;
-    users[phone].paid_start = users[phone].paid_start || now;
-    users[phone].paid_end = base + dayMs(PAID_DAYS);
-    users[phone].source = source;
-    users[phone].updated_at = now;
+    users[key].paid_start = users[key].paid_start || now;
+    users[key].paid_end = base + dayMs(PAID_DAYS);
+    users[key].source = source;
+    users[key].updated_at = now;
   }
 
   saveUsers(users);
-  return users[phone];
+  return users[key];
 }
 
-function getAccess(phone) {
+function getAccess(key) {
   const users = loadUsers();
   const now = Date.now();
-  const u = users[phone] || null;
+  const u = users[key] || null;
   if (!u) return { ok: false, reason: "NO_USER" };
 
   if (Number(u.paid_end || 0) > now) return { ok: true, tier: "PAID", until: u.paid_end, user: u };
   if (Number(u.trial_end || 0) > now) return { ok: true, tier: "TRIAL", until: u.trial_end, user: u };
 
-  return { ok: false, reason: "EXPIRED", user: u };
+  return { ok: false, reason: "EXPIRED", user: u, until: u.trial_end || u.paid_end || 0 };
 }
 
 // =========================
 // PUBLIC ROUTES
 // =========================
-app.get("/", (req, res) => {
-  // root -> ui (guard will push to login if no cookie)
-  res.redirect(302, "/ui");
-});
+app.get("/", (req, res) => res.redirect(302, "/ui"));
 
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    message: "ALGTP™ – Algorithmic Trading Platform Scanner running ✅",
+    message: "ALGTP™ – Server running ✅",
     ui: "/ui",
     examples: ["/login", "/list?group=topGappers&limit=80", "/scan?symbols=NVDA,TSLA,AAPL"],
   });
@@ -308,12 +404,11 @@ app.get("/health", (req, res) => {
 
 app.get("/login", (req, res) => {
   if (hasClerk) return res.type("html").send(renderLoginPageClerk());
-  return res.type("html").send(renderLoginPage()); // fallback OTP
+  return res.type("html").send(renderLoginPage());
 });
 
-
 // =========================
-// AUTH ROUTES (OTP)
+// AUTH ROUTES (OTP) — fallback
 // =========================
 app.post("/auth/start", async (req, res) => {
   try {
@@ -357,15 +452,19 @@ app.post("/auth/verify", (req, res) => {
 
   otpStore.delete(phone);
 
-  // create trial once
   ensureUserTrial(phone);
-
-  // login cookie
   setCookie(res, "algtp_phone", phone, 7 * 24 * 3600);
 
   res.json({ ok: true });
 });
 
+// Logout (GET so <a href="/logout"> works)
+app.get("/logout", (req, res) => {
+  setCookie(res, "algtp_phone", "", 0);
+  res.redirect(302, "/login");
+});
+
+// Keep POST too (optional)
 app.post("/logout", (req, res) => {
   setCookie(res, "algtp_phone", "", 0);
   res.json({ ok: true });
@@ -373,6 +472,8 @@ app.post("/logout", (req, res) => {
 
 // =========================
 // PRICING + STRIPE
+// NOTE: currently keyed by OTP phone cookie.
+// If you want Clerk-only payments, we will switch key to userId later.
 // =========================
 app.get("/pricing", (req, res) => {
   const cookies = parseCookie(req);
@@ -395,7 +496,7 @@ body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24p
   <div class="muted">
     Plan <b>${PAID_DAYS} days</b> (Stripe).<br/>
     Login phone: <span class="mono">${phone || "-"}</span><br/>
-    *Bạn cần login OTP trước khi pay để hệ thống gắn payment đúng số phone.
+    *OTP login is required for payment mapping in this version.
   </div>
   <div style="margin-top:14px;">
     <a class="btn" href="/pay/stripe">Pay with Stripe</a>
@@ -409,13 +510,13 @@ app.get("/pay/stripe", (req, res) => {
   const cookies = parseCookie(req);
   const phone = cookies.algtp_phone;
 
-  if (!phone) return res.status(401).type("html").send(renderLoginPage("Please login first"));
+  if (!phone) return res.status(401).type("html").send(renderLoginPage("Please login (OTP) first"));
 
   const url = STRIPE_PAYMENT_LINK + "?client_reference_id=" + encodeURIComponent(phone);
   return res.redirect(302, url);
 });
 
-// minimal webhook (no signature verify)
+// ⚠️ WARNING: minimal webhook (NO signature verify) — keep only for testing
 app.post("/webhook/stripe", (req, res) => {
   try {
     const evt = req.body;
@@ -433,35 +534,33 @@ app.post("/webhook/stripe", (req, res) => {
 
 // =========================
 // GUARD: protect /ui* /list /scan
-// Put BEFORE your real /ui /list /scan handlers
 // =========================
 app.use((req, res, next) => {
   const p = req.path || "";
-  const needsGate =
-    p === "/ui" ||
-    p.startsWith("/ui/") ||
-    p === "/list" ||
-    p === "/scan";
-
+  const needsGate = p === "/ui" || p.startsWith("/ui/") || p === "/list" || p === "/scan";
   if (!needsGate) return next();
 
- const { userId } = hasClerk ? getAuth(req) : { userId: null };
-if (userId) {
-  // NOTE: bạn nên đổi trial/paid key sang userId (khuyến nghị)
-  ensureUserTrial(userId);
-  const access = getAccess(userId);
-  if (access.ok) return next();
-  return res.status(402).type("html").send(renderPaywallPage(access));
-}
+  // 1) Clerk session (primary)
+  if (hasClerk) {
+    const { userId } = getAuth(req);
+    if (userId) {
+      ensureUserTrial(userId);
+      const access = getAccess(userId);
+      if (access.ok) return next();
+      return res.status(402).type("html").send(renderPaywallPage(access));
+    }
+  }
 
-// fallback OTP cookie (giữ như cũ)
-const cookies = parseCookie(req);
-const phone = cookies.algtp_phone;
-if (!phone) return res.status(401).type("html").send(renderLoginPage("Please login"));
+  // 2) OTP cookie (fallback)
+  const cookies = parseCookie(req);
+  const phone = cookies.algtp_phone;
 
+  if (!phone) {
+    // If Clerk enabled -> go to Clerk login, else OTP login
+    return res.redirect(302, "/login");
+  }
 
   ensureUserTrial(phone);
-
   const access = getAccess(phone);
   if (access.ok) return next();
 
@@ -469,8 +568,7 @@ if (!phone) return res.status(401).type("html").send(renderLoginPage("Please log
 });
 
 // =========================
-// ✅ PLACEHOLDER UI/LIST/SCAN (so server runs)
-// You will replace these with your real code later.
+// PLACEHOLDER UI/LIST/SCAN
 // =========================
 app.get("/ui", (req, res) => {
   res.type("html").send(`<!doctype html>
@@ -479,7 +577,7 @@ app.get("/ui", (req, res) => {
 <style>:root{color-scheme:dark}body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui;padding:24px}</style>
 </head><body>
 <h2>✅ ALGTP UI is working</h2>
-<p>Now paste your real UI code inside <b>app.get("/ui", ...)</b> (as a string or file), not outside JS.</p>
+<p>Replace UI inside <b>app.get("/ui", ...)</b>.</p>
 <p><a href="/logout" style="color:#9ad">Logout</a></p>
 </body></html>`);
 });

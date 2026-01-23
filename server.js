@@ -36,6 +36,7 @@ function isE164(s) {
   return /^\+\d{10,15}$/.test(String(s || ""));
 }
 
+// Twilio only enabled if all present AND FROM is E.164
 const hasTwilio = Boolean(
   TWILIO_ACCOUNT_SID &&
   TWILIO_AUTH_TOKEN &&
@@ -49,7 +50,7 @@ if (!hasTwilio) {
   if (!TWILIO_AUTH_TOKEN) miss.push("TWILIO_AUTH_TOKEN");
   if (!TWILIO_FROM) miss.push("TWILIO_FROM");
   if (TWILIO_FROM && !isE164(TWILIO_FROM)) miss.push("TWILIO_FROM(not E.164)");
-  console.log("⚠️ Twilio disabled. Missing/invalid:", miss.join(", "));
+  console.log("⚠️ Twilio disabled. Missing/invalid:", miss.join(", ") || "(unknown)");
 } else {
   console.log("✅ Twilio enabled. FROM =", TWILIO_FROM);
 }
@@ -72,6 +73,9 @@ function cleanupOtp() {
   }
 }
 
+/* =========================
+   ✅ COOKIE HELPERS
+========================= */
 function parseCookie(req) {
   const raw = req.headers?.cookie || "";
   const out = {};
@@ -94,8 +98,10 @@ function setCookie(res, name, value, maxAgeSec) {
   res.setHeader("Set-Cookie", parts.join("; "));
 }
 
+/* =========================
+   ✅ Phone normalize -> E.164 US (+1...)
+========================= */
 function normalizePhone(input) {
-  // Accept: 12199868683 / 2199868683 / +12199868683 / +1xxxxxxxxxx
   let s = String(input || "").trim();
   if (!s) return null;
 
@@ -111,6 +117,7 @@ function normalizePhone(input) {
   const digits = s.replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
   if (digits.length === 10) return "+1" + digits;
+
   return null;
 }
 

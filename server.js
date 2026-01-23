@@ -1,138 +1,27 @@
-// npm i @clerk/express
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+require("dotenv").config();
 const express = require("express");
-const { clerkMiddleware, getAuth } = require("@clerk/express");
+const axios = require("axios");
 
 const app = express();
-app.use(clerkMiddleware());
-
-// ================== CONFIG ==================
-const users = {}; // demo memory store
-
-// ================== GATE MIDDLEWARE ==================
-app.use((req, res, next) => {
-  const p = req.path || "";
-
-  const needsGate =
-    p === "/ui" ||
-    p.startsWith("/ui/") ||
-    p === "/list" ||
-    p === "/scan";
-
-  if (!needsGate) return next();
-
-  const { userId } = getAuth(req);
-
-  if (!userId) {
-    return res.redirect(302, "/login");
-  }
-
-  ensureUserTrial(userId);
-
-  const access = getAccess(userId);
-  if (access.ok) return next();
-
-  return res.status(402).type("html").send(renderPaywallPage(access));
-});
-
-// ================== ACCESS LOGIC ==================
-function ensureUserTrial(userId) {
-  if (!users[userId]) {
-    users[userId] = {
-      trialStart: Date.now(),
-      paidUntil: null
-    };
-  }
-}
-
-function grantPaid30Days(userId, source = "STRIPE") {
-  ensureUserTrial(userId);
-  users[userId].paidUntil = Date.now() + 30 * 24 * 60 * 60 * 1000;
-  users[userId].source = source;
-}
-
-function getAccess(userId) {
-  const u = users[userId];
-  if (!u) return { ok: false, reason: "no_user" };
-
-  if (u.paidUntil && u.paidUntil > Date.now()) {
-    return { ok: true, mode: "paid" };
-  }
-
-  const trialDays = 3;
-  const trialMs = trialDays * 24 * 60 * 60 * 1000;
-
-  if (Date.now() - u.trialStart < trialMs) {
-    return { ok: true, mode: "trial" };
-  }
-
-  return { ok: false, reason: "expired" };
-}
-
-// ================== LOGIN PAGE ==================
-function renderLoginPage() {
-  const pk = process.env.CLERK_PUBLISHABLE_KEY || "";
-
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP Login</title>
-<style>
-:root{color-scheme:dark}
-body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
-.box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;
-border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
-</style>
-<script async crossorigin="anonymous"
-  data-clerk-publishable-key="${pk}"
-  src="https://js.clerk.com/v4/clerk.browser.js"></script>
-</head>
-<body>
-<div class="box">
-  <h2 style="text-align:center;">🔐 Login</h2>
-  <div id="clerk-signin"></div>
-</div>
-<script>
-window.addEventListener("load", async () => {
-  await Clerk.load();
-  Clerk.mountSignIn(document.getElementById("clerk-signin"), {
-    afterSignInUrl: "/ui",
-    afterSignUpUrl: "/ui"
-  });
-});
-</script>
-</body>
-</html>`;
-}
-
-app.get("/login", (req, res) => {
-  res.type("html").send(renderLoginPage());
-});
-
-// ================== DEMO UI ==================
-app.get("/ui", (req, res) => {
-  res.send("✅ Welcome to ALGTP UI");
-});
-
-// ================== PAYWALL ==================
-function renderPaywallPage(access) {
-  return `<h1>⛔ Access denied</h1>
-<p>Trial expired. Please upgrade.</p>`;
-}
-
-// ================== START ==================
-app.listen(3000, () => console.log("Server running on http://localhost:3000"));
-
-// ================== PAYWALL ==================
-function renderPaywallPage(access) {
-  return `<h1>⛔ Access denied</h1>
-<p>Trial expired. Please upgrade.</p>`;
-}
-
-// ================== START ==================
-app.listen(3000, () => console.log("Server running on http://localhost:3000"));
-
+app.use(express.json());
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);

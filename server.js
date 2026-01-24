@@ -1771,6 +1771,17 @@ ${rows.map(r => {
     : (flash ? `RESUME – LULD` : "");
   return `
     <tr class="${rowClass}" title="${tip}">
+function attachHaltFlag(row) {
+  const sym = String(row?.symbol || "").trim().toUpperCase();
+  if (!sym) return row;
+  const x = haltedMap.get(sym);
+  return {
+    ...row,
+    halted: Boolean(x?.halted),
+    haltIcon: x?.halted ? "⛔" : "",
+    lastEvent: x?.lastEvent || null
+  };
+}
 
 // ============================================================================
 // SECTION 17 — Listen

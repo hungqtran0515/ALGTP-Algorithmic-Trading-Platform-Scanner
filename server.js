@@ -1761,6 +1761,16 @@ function shouldFlash(sym){
       resumeFlash.set(sym, nowMs() + 8000);
     }
   }
+${rows.map(r => {
+  const sym = String(r.symbol || "");
+  const isHalt = Boolean(r.halted);
+  const flash = shouldFlash(sym);
+  const rowClass = isHalt ? "haltRow" : (flash ? "resumeFlash" : "");
+  const tip = isHalt
+    ? `HALT – LULD`
+    : (flash ? `RESUME – LULD` : "");
+  return `
+    <tr class="${rowClass}" title="${tip}">
 
 // ============================================================================
 // SECTION 17 — Listen

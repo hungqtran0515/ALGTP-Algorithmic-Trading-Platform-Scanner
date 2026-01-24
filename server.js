@@ -3,14 +3,20 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 
-const app = express();
-app.use(express.json());
-
 const session = require("express-session");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
-// --- session ---
+const app = express();
+app.use(express.json());
+
+// ========== CONFIG ==========
+const PORT = Number(process.env.PORT || 3000);
+
+// Nếu deploy Render + HTTPS thì bật:
+// app.set("trust proxy", 1);
+
+// ========== SESSION ==========
 app.use(
   session({
     name: "algtp.sid",
@@ -20,167 +26,137 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: false, // production HTTPS => true (hoặc set trust proxy bên dưới)
+      secure: false, // production HTTPS => true + trust proxy
       maxAge: 1000 * 60 * 60 * 24 * 14,
     },
   })
 );
 
-// Nếu deploy Render/Proxy + HTTPS, bật dòng này để cookie secure hoạt động ổn
-// app.set("trust proxy", 1);
-
 app.use(passport.initialize());
 app.use(passport.session());
 
-// --- passport serialize ---
+// ========== PASSPORT ==========
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
 
-// --- google strategy ---
 passport.use(
   new GoogleStrategy(
     {
       clientID: process.env.GOOGLE_CLIENT_ID || "",
       clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
-      callbackURL: process.env.GOOGLE_CALLBACK_URL || "http://localhost:3000/auth/google/callback",
+      callbackURL:
+        process.env.GOOGLE_CALLBACK_URL ||
+        "http://localhost:3000/auth/google/callback",
     },
     async (accessToken, refreshToken, profile, done) => {
-      // uid ổn định: google:<id>
       const uid = `google:${profile.id}`;
       const email = profile.emails?.[0]?.value || null;
       const name = profile.displayName || null;
-
       return done(null, { uid, email, name });
     }
   )
 );
 
-"use client";
-
-import type { CSSProperties } from "react";
-import { signIn } from "next-auth/react";
-
-export default function LoginPage() {
-  return (
-    <div style={styles.bg}>
-      <div style={{ ...styles.glow, ...styles.glowA }} />
-      <div style={{ ...styles.glow, ...styles.glowB }} />
-
-      <main style={styles.wrap}>
-        <section style={styles.card}>
-          <div style={styles.brandRow}>
-            <div style={styles.logo}>🚀</div>
-            <div>
-              <div style={styles.brand}>ALGTP™</div>
-              <div style={styles.tagline}>Algorithmic Trading Platform</div>
-            </div>
-          </div>
-
-          <h1 style={styles.h1}>Sign in to continue</h1>
-          <p style={styles.p}>Login nhanh bằng Google để vào Scanner & UI.</p>
-
-          <button
-            style={styles.googleBtn}
-            onClick={() => signIn("google", { callbackUrl: "/ui" })}
-          >
-            <span style={styles.gIcon} aria-hidden>G</span>
-            <span style={styles.btnText}>Continue with Google</span>
-            <span style={styles.btnArrow}>→</span>
-          </button>
-
-          <p style={styles.hint}>
-            Nếu bấm mà không bật popup Google, thường là do popup bị chặn.
-          </p>
-        </section>
-      </main>
-    </div>
-  );
+// ========== MIDDLEWARE GATE ==========
+function requireLogin(req, res, next) {
+  const uid = req.session?.uid;
+  if (!uid) return res.redirect(302, "/login");
+  next();
 }
 
-const styles: Record<string, CSSProperties> = {
-  bg: {
-    minHeight: "100vh",
-    background:
-      "radial-gradient(1200px 600px at 20% 10%, rgba(120, 80, 255, .25), transparent 60%)," +
-      "radial-gradient(1000px 600px at 90% 20%, rgba(0, 220, 255, .18), transparent 55%)," +
-      "linear-gradient(180deg, #070912 0%, #0b0d12 55%, #070912 100%)",
-    color: "#E7EAF3",
-    position: "relative",
-    overflow: "hidden",
-    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
-  },
-  glow: {
-    position: "absolute",
-    width: 560,
-    height: 560,
-    borderRadius: "50%",
-    filter: "blur(48px)",
-    opacity: 0.35,
-    pointerEvents: "none",
-  },
-  glowA: { left: -160, top: -180, background: "rgba(142,97,255,.55)" },
-  glowB: { right: -180, top: 40, background: "rgba(0,231,255,.35)" },
+// ========== LOGIN PAGE ==========
+function renderLoginPage() {
+  return `<!doctype html>
+<html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP™ Login</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;min-height:100vh;display:grid;place-items:center;
+background:radial-gradient(900px 500px at 10% 10%, rgba(120,80,255,.25), transparent 60%),
+radial-gradient(900px 500px at 90% 20%, rgba(0,220,255,.18), transparent 55%),
+linear-gradient(180deg,#070912 0%,#0b0d12 55%,#070912 100%);
+color:#e6e8ef;font-family:system-ui}
+.card{width:min(520px,92vw);padding:22px;border-radius:22px;
+background:rgba(18,24,43,.55);border:1px solid rgba(255,255,255,.14);
+box-shadow:0 20px 60px rgba(0,0,0,.45);backdrop-filter: blur(12px)}
+.brand{display:flex;gap:12px;align-items:center;margin-bottom:14px}
+.logo{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;
+background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-size:20px}
+h1{margin:10px 0 8px;font-size:26px}
+p{margin:0 0 16px;opacity:.86;line-height:1.5}
+a.btn{display:flex;align-items:center;justify-content:space-between;
+text-decoration:none;color:#e6e8ef;width:100%;
+padding:12px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.16);
+background:linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06));
+box-shadow:0 10px 26px rgba(0,0,0,.35)}
+a.btn:hover{transform:translateY(-1px);filter:brightness(1.06)}
+.small{margin-top:12px;font-size:12.5px;opacity:.75}
+</style>
+</head><body>
+  <div class="card">
+    <div class="brand">
+      <div class="logo">🚀</div>
+      <div>
+        <div style="font-weight:800">ALGTP™</div>
+        <div style="opacity:.75;font-size:12px">Algorithmic Trading Platform</div>
+      </div>
+    </div>
 
-  wrap: {
-    minHeight: "100vh",
-    display: "grid",
-    placeItems: "center",
-    padding: 20,
-    position: "relative",
-    zIndex: 1,
-  },
-  card: {
-    width: "100%",
-    maxWidth: 520,
-    padding: 22,
-    borderRadius: 22,
-    background: "rgba(18, 24, 43, 0.55)",
-    border: "1px solid rgba(255,255,255,.14)",
-    boxShadow: "0 20px 60px rgba(0,0,0,.45)",
-    backdropFilter: "blur(12px)",
-  },
-  brandRow: { display: "flex", gap: 12, alignItems: "center", marginBottom: 14 },
-  logo: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    display: "grid",
-    placeItems: "center",
-    background: "rgba(255,255,255,.08)",
-    border: "1px solid rgba(255,255,255,.12)",
-    fontSize: 20,
-  },
-  brand: { fontWeight: 800, letterSpacing: 0.4, fontSize: 16, lineHeight: 1.1 },
-  tagline: { opacity: 0.75, fontSize: 12.5, marginTop: 2 },
-  h1: { margin: "8px 0 8px", fontSize: 26, lineHeight: 1.15 },
-  p: { margin: "0 0 16px", opacity: 0.86, lineHeight: 1.5 },
-  googleBtn: {
-    width: "100%",
-    borderRadius: 16,
-    padding: "12px 14px",
-    border: "1px solid rgba(255,255,255,.16)",
-    background: "linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06))",
-    color: "#E7EAF3",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    boxShadow: "0 10px 26px rgba(0,0,0,.35)",
-  },
-  gIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
-    display: "grid",
-    placeItems: "center",
-    background: "rgba(0,0,0,.22)",
-    border: "1px solid rgba(255,255,255,.10)",
-    fontWeight: 900,
-  },
-  btnText: { fontSize: 14.5, fontWeight: 700, flex: 1, textAlign: "left" },
-  btnArrow: { opacity: 0.85, fontWeight: 800 },
-  hint: { marginTop: 12, opacity: 0.75, fontSize: 12.5, lineHeight: 1.4 },
-};
+    <h1>Sign in</h1>
+    <p>Login bằng Google để vào hệ thống.</p>
+
+    <a class="btn" href="/auth/google">
+      <span>Continue with Google</span>
+      <span>→</span>
+    </a>
+
+    <div class="small">Secure login • No password stored</div>
+  </div>
+</body></html>`;
+}
+
+app.get("/login", (req, res) => {
+  if (req.session?.uid) return res.redirect("/ui");
+  res.type("html").send(renderLoginPage());
+});
+
+// ========== AUTH ROUTES ==========
+app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
+
+app.get(
+  "/auth/google/callback",
+  passport.authenticate("google", { failureRedirect: "/login" }),
+  (req, res) => {
+    req.session.uid = req.user?.uid;
+    res.redirect("/ui");
+  }
+);
+
+app.post("/logout", (req, res) => {
+  req.session.destroy(() => res.redirect("/login"));
+});
+
+// ========== DEMO UI (mày thay bằng renderUI của mày) ==========
+app.get("/ui", requireLogin, (req, res) => {
+  res.send(`<h1>✅ Logged in</h1><form method="POST" action="/logout"><button>Logout</button></form>`);
+});
+
+// ========== DEMO API (mày thay bằng code Massive của mày) ==========
+app.get("/scan", requireLogin, async (req, res) => {
+  res.json({ ok: true, symbols: req.query.symbols || "NVDA,TSLA" });
+});
+
+app.get("/list", requireLogin, async (req, res) => {
+  res.json({ ok: true, group: req.query.group || "topGainers" });
+});
+
+// ========== ROOT ==========
+app.get("/", (req, res) => {
+  res.json({ ok: true, ui: "/ui", login: "/login" });
+});
+
+
 
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);

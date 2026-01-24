@@ -1734,7 +1734,7 @@ app.get("/dividends", async (req, res) => {
 startHaltWebSocket();
 
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
+  console.log(`✅ ALGTP™ – Algorithmic Trading Platform running http://localhost:${PORT}`);
   console.log(`🚀 UI: http://localhost:${PORT}/ui`);
   console.log(`⛔ HALTS: http://localhost:${PORT}/halts`);
 });

@@ -1,11 +1,9 @@
 // ============================================================================
 // SECTION 01 — Imports + App Init
 // ============================================================================
-import dotenv from "dotenv";
-dotenv.config(); // 🔑 BẮT BUỘC GỌI
-
-import express from "express";
-import axios from "axios";
+require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
 
 const app = express();
 app.use(express.json());

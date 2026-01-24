@@ -1739,6 +1739,18 @@ function attachHaltFlag(row) {
   if (!sym) return row;
   return { ...row, halted: isHalted(sym), haltIcon: haltBadge(sym) };
 }
+/* ===== HALT UI ===== */
+tr.haltRow td { background: rgba(255, 80, 80, .10) !important; }
+tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
+// ===== HALT/RESUME flash memory =====
+const resumeFlash = new Map(); // symbol -> expiresAt(ms)
+function nowMs(){ return Date.now(); }
+function shouldFlash(sym){
+  const exp = resumeFlash.get(sym);
+  if (!exp) return false;
+  if (nowMs() > exp){ resumeFlash.delete(sym); return false; }
+  return true;
+}
 
 // ============================================================================
 // SECTION 17 — Listen

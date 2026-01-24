@@ -25,17 +25,16 @@ const MASSIVE_TICKER_SNAPSHOT_URL = String(
   process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
-// Snapshot ALL tickers (for pre/after/snapshot-all scanners)
-// NOTE: per your .env screenshot you set it to .../tickers
+// Snapshot ALL tickers (pre/after/snapshot-all scanners)
 const MASSIVE_SNAPSHOT_ALL_URL = String(
   process.env.MASSIVE_SNAPSHOT_ALL_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
-// Aggs for indicators
+// Aggs
 const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
 const AGGS_INCLUDE_PREPOST = String(process.env.AGGS_INCLUDE_PREPOST || "true").toLowerCase() === "true";
 
-// Optional: dividends
+// Optional dividends
 const MASSIVE_DIVIDENDS_URL = String(
   process.env.MASSIVE_DIVIDENDS_URL || "https://api.massive.com/v3/reference/dividends"
 ).trim();
@@ -44,16 +43,20 @@ const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() ===
 const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
 const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 
-// Indicators toggle + limits
+// Indicators
 const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
 const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
 
-// VWAP/Volume spike thresholds
+// Volume spike thresholds
 const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
 const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
 
+// HALT WS
+const ENABLE_HALT_WS = String(process.env.ENABLE_HALT_WS || "true").toLowerCase() === "true";
+const MASSIVE_WS_URL = String(process.env.MASSIVE_WS_URL || "wss://socket.massive.com/stocks").trim();
+
 // ============================================================================
-// SECTION 03 — Helpers (envMissing/auth/parse/n/round2/clamp/mapPool)
+// SECTION 03 — Helpers
 // ============================================================================
 function envMissing() {
   const miss = [];
@@ -121,7 +124,7 @@ async function mapPool(items, concurrency, fn) {
 // ============================================================================
 function demandScore(row) {
   const gap = Math.abs(n(row?.gapPct) ?? 0);
-  const pc = Math.abs(n(row?.pricePct) ?? 0);
+  const pc = Math.abs(n(row?.pricePct ?? row?.extPct) ?? 0);
 
   let s = 0;
   if (gap >= 20) s += 1;
@@ -130,7 +133,6 @@ function demandScore(row) {
   if (pc >= 10) s += 1;
   if (pc >= 20) s += 1;
 
-  // small bonus if above vwap + vol spike (pre/after as well)
   if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
 
   return clamp(s, 0, 5);
@@ -143,7 +145,6 @@ function signalIcon(d) {
   return "⛔️";
 }
 
-// price action / volume above vwap => alert + icon
 function paSignalIcon(row) {
   const above = Boolean(row?.aboveVWAP_5m);
   const volSpike = Boolean(row?.volSpike_5m);
@@ -402,7 +403,7 @@ function normalizeSnapshotAuto(ticker, snap) {
     floatShares = ff.value;
   }
 
-  // Market cap (may be missing on some snapshot endpoints)
+  // Market cap (may be missing)
   let marketCap =
     n(root?.marketCap) ??
     n(root?.marketcap) ??
@@ -425,7 +426,7 @@ function normalizeSnapshotAuto(ticker, snap) {
     marketCap = mc.value;
   }
 
-  // NOTICE(ADD): fallback marketCap estimate (helps mid/big filter)
+  // Fallback marketCap estimate: price * floatShares (helps mid/big cap filter)
   const marketCapEst = marketCap === null && price !== null && floatShares !== null ? price * floatShares : null;
   const marketCapFinal = marketCap ?? marketCapEst;
 
@@ -529,7 +530,6 @@ function indicatorsFromAggs5m(barsDesc) {
       ema9_5m: null,
       ema34_5m: null,
       vwap_5m: null,
-      vwapBar_5m: null,
       lastVol_5m: null,
       avgVol_5m: null,
     };
@@ -539,13 +539,11 @@ function indicatorsFromAggs5m(barsDesc) {
     .map((b) => ({
       c: n(b?.c ?? b?.close),
       v: n(b?.v ?? b?.volume),
-      vw: n(b?.vw),
-      t: n(b?.t) ?? null,
     }))
     .filter((x) => x.c !== null)
     .slice(0, 600);
 
-  const barsChrono = [...bars].reverse(); // oldest -> newest
+  const barsChrono = [...bars].reverse();
   const closes = barsChrono.map((x) => x.c);
   const vols = barsChrono.map((x) => x.v ?? 0);
 
@@ -555,8 +553,6 @@ function indicatorsFromAggs5m(barsDesc) {
   const vwap = computeVWAP(closes, vols);
 
   const lastBar = barsChrono[barsChrono.length - 1] || null;
-  const vwapBar = lastBar?.vw ?? null;
-
   const lastVol = lastBar?.v ?? null;
   const avgVol = computeAvg(vols.slice(-VOL_AVG_LEN_5M));
 
@@ -565,13 +561,12 @@ function indicatorsFromAggs5m(barsDesc) {
     ema9_5m: ema9 !== null ? round2(ema9) : null,
     ema34_5m: ema34 !== null ? round2(ema34) : null,
     vwap_5m: vwap !== null ? round2(vwap) : null,
-    vwapBar_5m: vwapBar !== null ? round2(vwapBar) : null,
     lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
     avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
   };
 }
 
-const aggsCache = new Map(); // key: "TICKER|5m" -> { ts, bars }
+const aggsCache = new Map(); // key -> {ts,bars}
 
 function ymd(d) {
   const x = new Date(d);
@@ -586,7 +581,6 @@ async function fetchAggs5m(ticker) {
   const cacheKey = `${sym}|5m`;
   const now = Date.now();
 
-  // cache 25s
   const hit = aggsCache.get(cacheKey);
   if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
 
@@ -627,14 +621,14 @@ function attach5mSignals(row) {
 }
 
 // ============================================================================
-// SECTION 10 — Session Utils (Pre/RTH/After) for Snapshot-All filters
+// SECTION 10 — Session Utils (Pre/RTH/After)
 // ============================================================================
 function toMs(ts) {
   const x = n(ts);
   if (x === null) return null;
-  if (x > 1e14) return Math.floor(x / 1e6); // ns -> ms
-  if (x > 1e12) return Math.floor(x);       // ms
-  if (x > 1e9) return Math.floor(x * 1000); // seconds -> ms
+  if (x > 1e14) return Math.floor(x / 1e6);
+  if (x > 1e12) return Math.floor(x);
+  if (x > 1e9) return Math.floor(x * 1000);
   return null;
 }
 
@@ -677,7 +671,111 @@ function addExtPct(row, rawSnap) {
 }
 
 // ============================================================================
-// SECTION 11 — UI Renderer (renderUI)
+// SECTION 11 — HALT/RESUME WebSocket (LULD 17/18) + /halts API + attachHaltFlag
+// ============================================================================
+let WebSocketLib = null;
+try {
+  WebSocketLib = require("ws");
+} catch (e) {
+  WebSocketLib = null;
+}
+
+const haltedMap = new Map(); // symbol -> { halted, lastEvent, tsMs, reason }
+function nowMs() { return Date.now(); }
+
+function setHalt(sym) {
+  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: nowMs(), reason: "LULD" });
+}
+function setResume(sym) {
+  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: nowMs(), reason: "LULD" });
+}
+
+function handleWsPayload(payload) {
+  const msgs = Array.isArray(payload) ? payload : [payload];
+  for (const m of msgs) {
+    if (!m || typeof m !== "object") continue;
+    const ev = String(m.ev || m.event || "").toUpperCase();
+    if (ev !== "LULD") continue;
+
+    const sym = String(m.T || m.ticker || m.sym || "").trim().toUpperCase();
+    if (!sym) continue;
+
+    const indicators = Array.isArray(m.i) ? m.i : Array.isArray(m.indicators) ? m.indicators : [];
+    if (indicators.includes(17)) setHalt(sym);
+    if (indicators.includes(18)) setResume(sym);
+  }
+}
+
+function startHaltWebSocket() {
+  if (!ENABLE_HALT_WS) return;
+  if (!WebSocketLib) {
+    console.log("⚠️ ws package not installed. Run: npm i ws");
+    return;
+  }
+  if (!MASSIVE_API_KEY) {
+    console.log("⚠️ Missing MASSIVE_API_KEY. Halt WS disabled.");
+    return;
+  }
+
+  const ws = new WebSocketLib(MASSIVE_WS_URL);
+
+  ws.on("open", () => {
+    try {
+      ws.send(JSON.stringify({ action: "auth", params: MASSIVE_API_KEY }));
+      ws.send(JSON.stringify({ action: "subscribe", params: "LULD.*" }));
+      console.log("✅ HALT WS connected + subscribed LULD.*");
+    } catch (e) {
+      console.log("⚠️ HALT WS open error:", String(e?.message || e));
+    }
+  });
+
+  ws.on("message", (buf) => {
+    try {
+      const parsed = JSON.parse(buf.toString("utf8"));
+      handleWsPayload(parsed);
+    } catch {
+      // ignore
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("⚠️ HALT WS closed. Reconnect in 3s...");
+    setTimeout(startHaltWebSocket, 3000);
+  });
+
+  ws.on("error", (err) => {
+    console.log("⚠️ HALT WS error:", String(err?.message || err));
+  });
+}
+
+function attachHaltFlag(row) {
+  const sym = String(row?.symbol || "").trim().toUpperCase();
+  if (!sym) return row;
+  const x = haltedMap.get(sym);
+  const halted = Boolean(x?.halted);
+  return {
+    ...row,
+    halted,
+    haltIcon: halted ? "⛔" : "",
+    haltReason: x?.reason || null,
+    lastEvent: x?.lastEvent || null,
+    haltTsMs: x?.tsMs || null,
+  };
+}
+
+app.get("/halts", (req, res) => {
+  const only = String(req.query.only || "halted").toLowerCase(); // halted|all
+  const out = [];
+  for (const [symbol, v] of haltedMap.entries()) {
+    if (only === "halted" && !v.halted) continue;
+    out.push({ symbol, ...v });
+  }
+  out.sort((a, b) => (b.tsMs ?? 0) - (a.tsMs ?? 0));
+  res.json({ ok: true, count: out.length, results: out.slice(0, 500) });
+});
+
+// ============================================================================
+// SECTION 12 — UI Renderer (renderUI)
 // ============================================================================
 function renderUI(preset = {}) {
   const presetGroup = preset.group || "topGainers";
@@ -692,7 +790,7 @@ function renderUI(preset = {}) {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ALGTP™ – Algorithmic Trading Platform Scanner</title>
+  <title>ALGTP™ – Scanner</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0d12; color:#e6e8ef;}
@@ -731,6 +829,10 @@ function renderUI(preset = {}) {
     .symLink { color:#e6e8ef; text-decoration:none; border-bottom:1px dashed rgba(255,255,255,.25); cursor:pointer; }
     .symLink:hover { border-bottom-color: rgba(255,255,255,.55); }
 
+    /* ===== HALT UI ===== */
+    tr.haltRow td { background: rgba(255, 80, 80, .10) !important; }
+    tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
+
     /* Modal */
     .modalBack { position:fixed; inset:0; background: rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:50; }
     .modal { width:min(1100px, 94vw); height:min(720px, 88vh); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; overflow:hidden; box-shadow: 0 18px 70px rgba(0,0,0,.55); }
@@ -745,8 +847,8 @@ function renderUI(preset = {}) {
 <body>
 <header>
   <div class="wrap">
-    <h1>ALGTP™ – Algorithmic Trading Platform Scanner</h1>
-    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Pre/After • Alerts • Auto Refresh • Scan Symbols • Click ticker for chart</div>
+    <h1>ALGTP™ – Scanner</h1>
+    <div class="sub">RTH • Pre/After • SMA/EMA/VWAP • HALT/RESUME • Alerts • Auto refresh • Click ticker for chart</div>
 
     <div class="nav">
       <a href="/ui" style="${active("/ui")}">Dashboard</a>
@@ -797,7 +899,6 @@ function renderUI(preset = {}) {
 
       <button id="runBtn">Run</button>
       <button id="notifyBtn">Enable Notifications</button>
-
       <span class="badge" id="statusBadge">Idle</span>
     </div>
 
@@ -828,8 +929,8 @@ function renderUI(preset = {}) {
     </div>
 
     <div class="hint">
-      Click any ticker to open a TradingView chart (modal) or enable "Open new window" (or Ctrl/Cmd+Click).
-      <br/>Indicators: <b>SMA26</b>, <b>EMA9</b>, <b>EMA34</b>, <b>VWAP</b> from 5m aggs. Pre/After uses snapshot-all + indicators.
+      🔴 HALT row = red • 🟢 RESUME row = green flash • Tooltip shows HALT/RESUME reason.
+      <br/>Click ticker: modal chart (default) or enable "Open new window" (or Ctrl/Cmd+Click).
     </div>
 
     <div class="err" id="errBox"></div>
@@ -885,6 +986,16 @@ const out = byId("out");
 const errBox = byId("errBox");
 const statusBadge = byId("statusBadge");
 const countdownBadge = byId("countdownBadge");
+
+// ===== RESUME flash memory =====
+const resumeFlash = new Map(); // symbol -> expiresAt(ms)
+function nowMs(){ return Date.now(); }
+function shouldFlash(sym){
+  const exp = resumeFlash.get(sym);
+  if (!exp) return false;
+  if (nowMs() > exp){ resumeFlash.delete(sym); return false; }
+  return true;
+}
 
 function setStatus(t){ statusBadge.textContent = t; }
 function showError(obj){
@@ -955,6 +1066,7 @@ function getAlertCfg(){
 function shouldAlertRow(r, cfg){
   if (!cfg.alertsOn) return false;
   if (!r || !r.symbol) return false;
+  if (r.halted) return false; // ✅ no alerts during HALT
   if (alerted.has(r.symbol)) return false;
 
   const score = Number(r.demandScore ?? 0);
@@ -987,7 +1099,7 @@ function fireAlert(r, cfg){
 
   const body = parts.join(" | ") || "Signal";
   if (cfg.soundOn) beep();
-  if (cfg.desktopOn) pushNotification(\`\${r.signalIcon || ""}\${r.paIcon ? " " + r.paIcon : ""} \${r.symbol}\`, body);
+  if (cfg.desktopOn) pushNotification(\`\${r.haltIcon || ""}\${r.signalIcon || ""}\${r.paIcon ? " " + r.paIcon : ""} \${r.symbol}\`, body);
 }
 function runAlerts(data){
   const cfg = getAlertCfg();
@@ -1071,7 +1183,6 @@ function openChart(sym){
 function handleTickerClick(ev, sym){
   const forceNew = byId("openNewWin")?.checked;
   const modifier = ev && (ev.ctrlKey || ev.metaKey);
-
   if (forceNew || modifier){
     const url = tvUrlFor(sym);
     const newTab = byId("openNewTab")?.checked !== false;
@@ -1092,6 +1203,15 @@ tfSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSym
 // -------- Render Table --------
 function renderList(data){
   const rows = Array.isArray(data.results) ? data.results : [];
+
+  // flash green for RESUME for 8 seconds
+  for (const r of rows){
+    if (!r || !r.symbol) continue;
+    if (r.halted === false && r.lastEvent === "RESUME") {
+      resumeFlash.set(String(r.symbol), nowMs() + 8000);
+    }
+  }
+
   const titleRight = data.mode === "symbols"
     ? \`Symbols • \${rows.length} rows\`
     : \`\${data.group} • cap=\${data.cap} • \${rows.length} rows\`;
@@ -1118,36 +1238,44 @@ function renderList(data){
             <th class="right">MCap(B)</th>
             <th>Cap</th>
             <th class="right">Score</th>
-            <th class="right">SMA26(5m)</th>
-            <th class="right">EMA9(5m)</th>
-            <th class="right">EMA34(5m)</th>
-            <th class="right">VWAP(5m)</th>
+            <th class="right">SMA26</th>
+            <th class="right">EMA9</th>
+            <th class="right">EMA34</th>
+            <th class="right">VWAP</th>
           </tr>
         </thead>
         <tbody>
-          \${rows.map(r => \`
-            <tr>
-              <td>\${r.signalIcon || ""}</td>
-              <td>\${r.paIcon || ""}</td>
-              <td class="mono">
-                <a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'\${String(r.symbol||"").replace(/'/g,"")}')">\${r.symbol || ""}</a>
-              </td>
-              <td class="right mono">\${fmtNum(r.price)}</td>
-              <td class="right mono">\${fmtNum(r.pricePct)}%</td>
-              <td class="right mono">\${fmtNum(r.extPct)}%</td>
-              <td class="right mono">\${fmtNum(r.gapPct)}%</td>
-              <td class="right mono">\${fmtInt(r.volume)}</td>
-              <td class="right mono">\${fmtNum(r.floatM)}</td>
-              <td>\${r.floatCat || "-"}</td>
-              <td class="right mono">\${fmtNum(r.marketCapB)}</td>
-              <td>\${r.cap || "-"}</td>
-              <td class="right mono">\${r.demandScore ?? "-"}</td>
-              <td class="right mono">\${fmtNum(r.sma26_5m)}</td>
-              <td class="right mono">\${fmtNum(r.ema9_5m)}</td>
-              <td class="right mono">\${fmtNum(r.ema34_5m)}</td>
-              <td class="right mono">\${fmtNum(r.vwap_5m)}</td>
-            </tr>
-          \`).join("")}
+          \${rows.map(r => {
+            const sym = String(r.symbol||"");
+            const isHalt = Boolean(r.halted);
+            const flash = shouldFlash(sym);
+            const rowClass = isHalt ? "haltRow" : (flash ? "resumeFlash" : "");
+            const tip = isHalt
+              ? \`HALT – \${r.haltReason || "LULD"}\`
+              : (flash ? \`RESUME – \${r.haltReason || "LULD"}\` : "");
+            return \`
+              <tr class="\${rowClass}" title="\${tip}">
+                <td>\${r.haltIcon || ""}\${r.signalIcon || ""}</td>
+                <td>\${r.paIcon || ""}</td>
+                <td class="mono">
+                  <a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'\${String(r.symbol||"").replace(/'/g,"")}')">\${r.symbol || ""}</a>
+                </td>
+                <td class="right mono">\${fmtNum(r.price)}</td>
+                <td class="right mono">\${fmtNum(r.pricePct)}%</td>
+                <td class="right mono">\${fmtNum(r.extPct)}%</td>
+                <td class="right mono">\${fmtNum(r.gapPct)}%</td>
+                <td class="right mono">\${fmtInt(r.volume)}</td>
+                <td class="right mono">\${fmtNum(r.floatM)}</td>
+                <td>\${r.floatCat || "-"}</td>
+                <td class="right mono">\${fmtNum(r.marketCapB)}</td>
+                <td>\${r.cap || "-"}</td>
+                <td class="right mono">\${r.demandScore ?? "-"}</td>
+                <td class="right mono">\${fmtNum(r.sma26_5m)}</td>
+                <td class="right mono">\${fmtNum(r.ema9_5m)}</td>
+                <td class="right mono">\${fmtNum(r.ema34_5m)}</td>
+                <td class="right mono">\${fmtNum(r.vwap_5m)}</td>
+              </tr>\`;
+          }).join("")}
         </tbody>
       </table>
     </div>
@@ -1235,12 +1363,8 @@ async function run(){
     renderList(data);
     runAlerts(data);
 
-    if (data.snapshotErrors && data.snapshotErrors.length){
-      showError({ snapshotErrors: data.snapshotErrors });
-    }
-    if (data.aggsErrors && data.aggsErrors.length){
-      showError({ aggsErrors: data.aggsErrors });
-    }
+    if (data.snapshotErrors && data.snapshotErrors.length) showError({ snapshotErrors: data.snapshotErrors });
+    if (data.aggsErrors && data.aggsErrors.length) showError({ aggsErrors: data.aggsErrors });
   }catch(e){
     setStatus("Error");
     showError(String(e?.message || e));
@@ -1266,10 +1390,7 @@ function setPreset(){
 
 byId("runBtn").addEventListener("click", run);
 byId("notifyBtn").addEventListener("click", enableNotifications);
-byId("clearAlertsBtn").addEventListener("click", ()=>{
-  alerted.clear();
-  alert("Alert memory cleared.");
-});
+byId("clearAlertsBtn").addEventListener("click", ()=>{ alerted.clear(); alert("Alert memory cleared."); });
 
 byId("applyAutoBtn").addEventListener("click", applyAuto);
 byId("stopAutoBtn").addEventListener("click", stopAuto);
@@ -1284,7 +1405,7 @@ run();
 }
 
 // ============================================================================
-// SECTION 12 — UI Routes
+// SECTION 13 — UI Routes
 // ============================================================================
 app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 50 })));
 app.get("/ui/gainers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 50 })));
@@ -1294,38 +1415,19 @@ app.get("/ui/smallcap", (req, res) => res.type("html").send(renderUI({ path: "/u
 app.get("/ui/midcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80 })));
 app.get("/ui/bigcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80 })));
 
-// session pages (reuse same UI)
 app.get("/ui/premarket", (req, res) => res.type("html").send(renderUI({ path: "/ui/premarket", group: "premarket", cap: "all", limit: 80 })));
 app.get("/ui/aftermarket", (req, res) => res.type("html").send(renderUI({ path: "/ui/aftermarket", group: "aftermarket", cap: "all", limit: 80 })));
 app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path: "/ui/snapshot-all", group: "snapshotAll", cap: "all", limit: 100 })));
 
 // ============================================================================
-// SECTION 13 — Base API Routes
+// SECTION 14 — Base API Routes
 // ============================================================================
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "ALGTP™ – Algorithmic Trading Platform Scanner running ✅",
+    message: "ALGTP™ Scanner running ✅",
     ui: "/ui",
-    pages: [
-      "/ui",
-      "/ui/gainers",
-      "/ui/losers",
-      "/ui/gappers",
-      "/ui/smallcap",
-      "/ui/midcap",
-      "/ui/bigcap",
-      "/ui/premarket",
-      "/ui/aftermarket",
-      "/ui/snapshot-all",
-    ],
-    examples: [
-      "/list?group=topGappers&limit=80&cap=all&minGap=10",
-      "/scan?symbols=NVDA,TSLA,AAPL",
-      "/premarket?cap=all&limit=80",
-      "/aftermarket?cap=all&limit=80",
-      "/snapshot-all?cap=all&limit=100",
-    ],
+    endpoints: ["/scan", "/list", "/snapshot-all", "/premarket", "/aftermarket", "/halts"],
   });
 });
 
@@ -1342,19 +1444,18 @@ app.get("/api", (req, res) => {
       snapshotAllUrl: MASSIVE_SNAPSHOT_ALL_URL,
       aggsUrl: MASSIVE_AGGS_URL,
       includePrePost: AGGS_INCLUDE_PREPOST,
-      includeOtc: INCLUDE_OTC,
-      snapConcurrency: SNAP_CONCURRENCY,
-      debug: DEBUG,
       enable5mIndicators: ENABLE_5M_INDICATORS,
       aggs5mLimit: AGGS_5M_LIMIT,
-      volSpikeMult: VOL_SPIKE_MULT,
-      volAvgLen5m: VOL_AVG_LEN_5M,
+      snapConcurrency: SNAP_CONCURRENCY,
+      includeOtc: INCLUDE_OTC,
+      haltWs: ENABLE_HALT_WS,
+      wsUrl: MASSIVE_WS_URL,
     },
   });
 });
 
 // ============================================================================
-// SECTION 14 — Main Scanner Endpoints (/scan, /list)
+// SECTION 15 — /scan (Symbols) + /list (Movers)
 // ============================================================================
 app.get("/scan", async (req, res) => {
   try {
@@ -1379,16 +1480,7 @@ app.get("/scan", async (req, res) => {
         const a = await fetchAggs5m(r.symbol);
         if (!a.ok) {
           aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
-          return {
-            symbol: r.symbol,
-            sma26_5m: null,
-            ema9_5m: null,
-            ema34_5m: null,
-            vwap_5m: null,
-            vwapBar_5m: null,
-            lastVol_5m: null,
-            avgVol_5m: null,
-          };
+          return { symbol: r.symbol, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
         }
         return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
       });
@@ -1402,6 +1494,8 @@ app.get("/scan", async (req, res) => {
       const d = demandScore(r);
       return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
     });
+
+    rows = rows.map(attachHaltFlag);
 
     rows.sort(
       (a, b) =>
@@ -1438,10 +1532,11 @@ app.get("/list", async (req, res) => {
     const movers = await fetchMovers(direction);
     if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
 
+    // widen universe so mid/big filter doesn't end up empty
     const tickers = movers.rows
       .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
       .filter(Boolean)
-      .slice(0, limit * 3); // widen universe a bit so cap filter doesn't zero out
+      .slice(0, limit * 3);
 
     const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
@@ -1481,6 +1576,8 @@ app.get("/list", async (req, res) => {
       return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
     });
 
+    rows = rows.map(attachHaltFlag);
+
     sortRowsByGroup(rows, group);
 
     res.json({
@@ -1501,7 +1598,7 @@ app.get("/list", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 15 — Snapshot-All / Pre / After (API)
+// SECTION 16 — Snapshot-All / Pre / After (API)
 // ============================================================================
 async function buildRowsFromSnapshotAll({ cap, limit, session }) {
   const miss = envMissing();
@@ -1510,16 +1607,21 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
   const snap = await fetchSnapshotAll();
   if (!snap.ok) return { ok: false, status: 500, body: { ok: false, error: "Snapshot-all failed", debug: snap } };
 
-  const raw = snap.rows
-    .map((x) => ({ snap: x, ticker: String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase() }))
-    .filter((x) => x.ticker);
+  const snapMap = new Map();
+  for (const x of snap.rows) {
+    const t = String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase();
+    if (t) snapMap.set(t, x);
+  }
 
-  let rows = raw.map((x) => addExtPct(normalizeSnapshotAuto(x.ticker, x.snap), x.snap));
+  let rows = [];
+  for (const [ticker, rawSnap] of snapMap.entries()) {
+    rows.push(addExtPct(normalizeSnapshotAuto(ticker, rawSnap), rawSnap));
+  }
 
   if (session) {
     rows = rows.filter((r) => {
-      const src = raw.find((x) => x.ticker === r.symbol)?.snap;
-      const ms = snapshotTs(src);
+      const raw = snapMap.get(r.symbol);
+      const ms = snapshotTs(raw);
       if (!ms) return false;
       return sessionOfMs(ms) === session;
     });
@@ -1548,7 +1650,8 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
     return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
   });
 
-  // pre/after: sort by extPct, then vol
+  rows = rows.map(attachHaltFlag);
+
   rows.sort(
     (a, b) =>
       Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
@@ -1584,7 +1687,7 @@ app.get("/aftermarket", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 16 — Optional Dividends API
+// SECTION 17 — Optional Dividends API
 // ============================================================================
 app.get("/dividends", async (req, res) => {
   try {
@@ -1624,170 +1727,14 @@ app.get("/dividends", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Dividends failed", detail: String(e?.message || e) });
   }
 });
-// ============================================================================
-// SECTION 18 — HALT/RESUME (WebSocket LULD 17/18) + API
-// ============================================================================
-const ENABLE_HALT_WS = String(process.env.ENABLE_HALT_WS || "true").toLowerCase() === "true";
-const MASSIVE_WS_URL = String(process.env.MASSIVE_WS_URL || "wss://socket.massive.com/stocks").trim();
-
-let WebSocketLib = null;
-try {
-  WebSocketLib = require("ws");
-} catch (e) {
-  // if ws not installed, keep null and scanner still works
-}
-
-const haltedMap = new Map(); // symbol -> { halted:boolean, lastEvent, tsMs, raw }
-function nowMs() { return Date.now(); }
-
-function setHalt(sym, raw) {
-  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: nowMs(), raw });
-}
-function setResume(sym, raw) {
-  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: nowMs(), raw });
-}
-function isHalted(sym) {
-  const x = haltedMap.get(sym);
-  return Boolean(x?.halted);
-}
-function haltBadge(sym) {
-  return isHalted(sym) ? "⛔" : "";
-}
-
-// Robust parse WS payloads
-function handleWsPayload(payload) {
-  const msgs = Array.isArray(payload) ? payload : [payload];
-
-  for (const m of msgs) {
-    if (!m || typeof m !== "object") continue;
-
-    const ev = String(m.ev || m.event || "").toUpperCase();
-    if (ev !== "LULD") continue;
-
-    const sym = String(m.T || m.ticker || m.sym || "").trim().toUpperCase();
-    if (!sym) continue;
-
-    const indicators = Array.isArray(m.i) ? m.i : Array.isArray(m.indicators) ? m.indicators : [];
-    const has17 = indicators.includes(17);
-    const has18 = indicators.includes(18);
-
-    if (has17) setHalt(sym, m);
-    if (has18) setResume(sym, m);
-  }
-}
-
-// Start WS (auth + subscribe LULD.*)
-function startHaltWebSocket() {
-  if (!ENABLE_HALT_WS) return;
-  if (!WebSocketLib) {
-    console.log("⚠️ ws package not installed. Run: npm i ws");
-    return;
-  }
-  if (!MASSIVE_API_KEY) {
-    console.log("⚠️ Missing MASSIVE_API_KEY. Halt WS disabled.");
-    return;
-  }
-
-  const ws = new WebSocketLib(MASSIVE_WS_URL);
-
-  ws.on("open", () => {
-    try {
-      // Many Massive WS servers accept auth message like this:
-      ws.send(JSON.stringify({ action: "auth", params: MASSIVE_API_KEY }));
-      ws.send(JSON.stringify({ action: "subscribe", params: "LULD.*" }));
-      console.log("✅ Halt WS connected + subscribed: LULD.*");
-    } catch (e) {
-      console.log("⚠️ Halt WS open error:", String(e?.message || e));
-    }
-  });
-
-  ws.on("message", (buf) => {
-    try {
-      const txt = buf.toString("utf8");
-      const parsed = JSON.parse(txt);
-      handleWsPayload(parsed);
-    } catch (e) {
-      // ignore non-json
-    }
-  });
-
-  ws.on("close", () => {
-    console.log("⚠️ Halt WS closed. Reconnecting in 3s...");
-    setTimeout(startHaltWebSocket, 3000);
-  });
-
-  ws.on("error", (err) => {
-    console.log("⚠️ Halt WS error:", String(err?.message || err));
-  });
-}
-
-// API: view halted tickers
-app.get("/halts", (req, res) => {
-  const only = String(req.query.only || "halted").toLowerCase(); // halted|all
-  const out = [];
-  for (const [symbol, v] of haltedMap.entries()) {
-    if (only === "halted" && !v.halted) continue;
-    out.push({ symbol, ...v });
-  }
-  out.sort((a, b) => (b.tsMs ?? 0) - (a.tsMs ?? 0));
-  res.json({ ok: true, count: out.length, results: out.slice(0, 500) });
-});
-
-// Helper: attach halt flag to any row
-function attachHaltFlag(row) {
-  const sym = String(row?.symbol || "").trim().toUpperCase();
-  if (!sym) return row;
-  return { ...row, halted: isHalted(sym), haltIcon: haltBadge(sym) };
-}
-/* ===== HALT UI ===== */
-tr.haltRow td { background: rgba(255, 80, 80, .10) !important; }
-tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
-// ===== HALT/RESUME flash memory =====
-const resumeFlash = new Map(); // symbol -> expiresAt(ms)
-function nowMs(){ return Date.now(); }
-function shouldFlash(sym){
-  const exp = resumeFlash.get(sym);
-  if (!exp) return false;
-  if (nowMs() > exp){ resumeFlash.delete(sym); return false; }
-  return true;
-}
-  // update resume flash timers:
-  // if row is RESUMED recently, flash green for 8s
-  for (const r of rows){
-    if (!r || !r.symbol) continue;
-    const sym = String(r.symbol);
-    if (r.halted === false && r.lastEvent === "RESUME") {
-      // (nếu server có field lastEvent)
-      resumeFlash.set(sym, nowMs() + 8000);
-    }
-  }
-${rows.map(r => {
-  const sym = String(r.symbol || "");
-  const isHalt = Boolean(r.halted);
-  const flash = shouldFlash(sym);
-  const rowClass = isHalt ? "haltRow" : (flash ? "resumeFlash" : "");
-  const tip = isHalt
-    ? `HALT – LULD`
-    : (flash ? `RESUME – LULD` : "");
-  return `
-    <tr class="${rowClass}" title="${tip}">
-function attachHaltFlag(row) {
-  const sym = String(row?.symbol || "").trim().toUpperCase();
-  if (!sym) return row;
-  const x = haltedMap.get(sym);
-  return {
-    ...row,
-    halted: Boolean(x?.halted),
-    haltIcon: x?.halted ? "⛔" : "",
-    lastEvent: x?.lastEvent || null
-  };
-}
 
 // ============================================================================
-// SECTION 17 — Listen
+// SECTION 18 — Listen
 // ============================================================================
+startHaltWebSocket();
+
 app.listen(PORT, () => {
   console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
   console.log(`🚀 UI: http://localhost:${PORT}/ui`);
-  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
+  console.log(`⛔ HALTS: http://localhost:${PORT}/halts`);
 });

@@ -5,14 +5,16 @@ const axios = require("axios");
 
 const app = express();
 app.use(express.json());
+
+
 "use client";
 
+import type { CSSProperties } from "react";
 import { signIn } from "next-auth/react";
 
 export default function LoginPage() {
   return (
     <div style={styles.bg}>
-      {/* glow */}
       <div style={{ ...styles.glow, ...styles.glowA }} />
       <div style={{ ...styles.glow, ...styles.glowB }} />
 
@@ -27,81 +29,27 @@ export default function LoginPage() {
           </div>
 
           <h1 style={styles.h1}>Sign in to continue</h1>
-          <p style={styles.p}>
-            Login nhanh bằng Google để vào <b>Scanner</b> và <b>UI</b>.
-          </p>
+          <p style={styles.p}>Login nhanh bằng Google để vào Scanner & UI.</p>
 
           <button
             style={styles.googleBtn}
             onClick={() => signIn("google", { callbackUrl: "/ui" })}
           >
-            <span style={styles.gIcon} aria-hidden>
-              {/* simple Google-like mark */}
-              <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
-                <path
-                  d="M44.5 24.5c0-1.6-.1-2.8-.3-4.1H24v7.8h11.6c-.2 1.9-1.5 4.8-4.4 6.8l-.1.6 6.4 4.9.4.1c3.8-3.5 6.2-8.7 6.2-15z"
-                  fill="currentColor"
-                  opacity="0.9"
-                />
-                <path
-                  d="M24 45c5.8 0 10.6-1.9 14.1-5.1l-6.7-5.2c-1.8 1.3-4.2 2.2-7.4 2.2-5.7 0-10.5-3.7-12.2-8.9l-.6.1-6.6 5.1-.2.6C7.8 40.4 15.3 45 24 45z"
-                  fill="currentColor"
-                  opacity="0.7"
-                />
-                <path
-                  d="M11.8 28c-.4-1.2-.7-2.5-.7-3.9s.3-2.7.6-3.9l-.1-.6-6.8-5.2-.5.2C3 16.9 2 20.4 2 24.1s1 7.2 2.5 10.3l7.3-6.4z"
-                  fill="currentColor"
-                  opacity="0.6"
-                />
-                <path
-                  d="M24 11.2c3.7 0 6.2 1.6 7.6 2.9l5.5-5.4C34.6 6.1 29.8 3.2 24 3.2 15.3 3.2 7.8 7.8 4.5 14.6l7.3 5.6c1.7-5.2 6.5-9 12.2-9z"
-                  fill="currentColor"
-                  opacity="0.8"
-                />
-              </svg>
-            </span>
+            <span style={styles.gIcon} aria-hidden>G</span>
             <span style={styles.btnText}>Continue with Google</span>
             <span style={styles.btnArrow}>→</span>
           </button>
 
-          <div style={styles.divider}>
-            <span style={styles.divLine} />
-            <span style={styles.divText}>Secure sign-in</span>
-            <span style={styles.divLine} />
-          </div>
-
-          <ul style={styles.points}>
-            <li style={styles.point}>✅ Session bảo mật, không lưu password</li>
-            <li style={styles.point}>⚡ Vào thẳng UI sau khi login</li>
-            <li style={styles.point}>🧠 Sẵn sàng gắn Trial / Paywall</li>
-          </ul>
-
-          <footer style={styles.footer}>
-            <span style={{ opacity: 0.8 }}>Need help?</span>{" "}
-            <a style={styles.link} href="/ui">
-              Go to UI
-            </a>
-          </footer>
+          <p style={styles.hint}>
+            Nếu bấm mà không bật popup Google, thường là do popup bị chặn.
+          </p>
         </section>
       </main>
-
-      {/* tiny css for hover/active */}
-      <style>{`
-        button[data-algtp-google="1"]:hover { transform: translateY(-1px); filter: brightness(1.06); }
-        button[data-algtp-google="1"]:active { transform: translateY(0px) scale(0.99); }
-      `}</style>
-
-      {/* attach hover hooks */}
-      <script
-        dangerouslySetInnerHTML={{
-          __html: `document.querySelectorAll('button').forEach(b=>{ if(b.textContent.includes('Google')) b.setAttribute('data-algtp-google','1') })`,
-        }}
-      />
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   bg: {
     minHeight: "100vh",
     background:
@@ -122,16 +70,9 @@ const styles: Record<string, React.CSSProperties> = {
     opacity: 0.35,
     pointerEvents: "none",
   },
-  glowA: {
-    left: -160,
-    top: -180,
-    background: "rgba(142, 97, 255, 0.55)",
-  },
-  glowB: {
-    right: -180,
-    top: 40,
-    background: "rgba(0, 231, 255, 0.35)",
-  },
+  glowA: { left: -160, top: -180, background: "rgba(142,97,255,.55)" },
+  glowB: { right: -180, top: 40, background: "rgba(0,231,255,.35)" },
+
   wrap: {
     minHeight: "100vh",
     display: "grid",
@@ -150,12 +91,7 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 20px 60px rgba(0,0,0,.45)",
     backdropFilter: "blur(12px)",
   },
-  brandRow: {
-    display: "flex",
-    gap: 12,
-    alignItems: "center",
-    marginBottom: 14,
-  },
+  brandRow: { display: "flex", gap: 12, alignItems: "center", marginBottom: 14 },
   logo: {
     width: 44,
     height: 44,
@@ -164,44 +100,23 @@ const styles: Record<string, React.CSSProperties> = {
     placeItems: "center",
     background: "rgba(255,255,255,.08)",
     border: "1px solid rgba(255,255,255,.12)",
-    boxShadow: "inset 0 0 0 1px rgba(0,0,0,.15)",
     fontSize: 20,
   },
-  brand: {
-    fontWeight: 800,
-    letterSpacing: 0.4,
-    fontSize: 16,
-    lineHeight: 1.1,
-  },
-  tagline: {
-    opacity: 0.75,
-    fontSize: 12.5,
-    marginTop: 2,
-  },
-  h1: {
-    margin: "8px 0 8px",
-    fontSize: 26,
-    lineHeight: 1.15,
-    letterSpacing: -0.3,
-  },
-  p: {
-    margin: "0 0 16px",
-    opacity: 0.86,
-    lineHeight: 1.5,
-  },
+  brand: { fontWeight: 800, letterSpacing: 0.4, fontSize: 16, lineHeight: 1.1 },
+  tagline: { opacity: 0.75, fontSize: 12.5, marginTop: 2 },
+  h1: { margin: "8px 0 8px", fontSize: 26, lineHeight: 1.15 },
+  p: { margin: "0 0 16px", opacity: 0.86, lineHeight: 1.5 },
   googleBtn: {
     width: "100%",
     borderRadius: 16,
     padding: "12px 14px",
     border: "1px solid rgba(255,255,255,.16)",
-    background:
-      "linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06))",
+    background: "linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06))",
     color: "#E7EAF3",
     cursor: "pointer",
     display: "flex",
     alignItems: "center",
     gap: 10,
-    transition: "transform .15s ease, filter .15s ease",
     boxShadow: "0 10px 26px rgba(0,0,0,.35)",
   },
   gIcon: {
@@ -212,45 +127,13 @@ const styles: Record<string, React.CSSProperties> = {
     placeItems: "center",
     background: "rgba(0,0,0,.22)",
     border: "1px solid rgba(255,255,255,.10)",
-    color: "#fff",
+    fontWeight: 900,
   },
-  btnText: {
-    fontSize: 14.5,
-    fontWeight: 700,
-    letterSpacing: 0.2,
-    flex: 1,
-    textAlign: "left",
-  },
+  btnText: { fontSize: 14.5, fontWeight: 700, flex: 1, textAlign: "left" },
   btnArrow: { opacity: 0.85, fontWeight: 800 },
-  divider: {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    margin: "16px 0 10px",
-  },
-  divLine: { flex: 1, height: 1, background: "rgba(255,255,255,.12)" },
-  divText: { fontSize: 12, opacity: 0.7 },
-  points: {
-    margin: "10px 0 0",
-    paddingLeft: 18,
-    opacity: 0.9,
-    lineHeight: 1.55,
-    fontSize: 13.5,
-  },
-  point: { marginBottom: 6 },
-  footer: {
-    marginTop: 14,
-    paddingTop: 12,
-    borderTop: "1px solid rgba(255,255,255,.12)",
-    fontSize: 13,
-    opacity: 0.9,
-  },
-  link: {
-    color: "#9be7ff",
-    textDecoration: "none",
-    fontWeight: 700,
-  },
+  hint: { marginTop: 12, opacity: 0.75, fontSize: 12.5, lineHeight: 1.4 },
 };
+
 // ---------------- ENV ----------------
 const PORT = Number(process.env.PORT || 3000);
 

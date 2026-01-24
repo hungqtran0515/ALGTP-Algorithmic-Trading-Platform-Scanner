@@ -8,7 +8,6 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-
 // ============================================================================
 // SECTION 02 — ENV + Config
 // ============================================================================
@@ -665,8 +664,7 @@ function addExtPct(row, rawSnap) {
 // ============================================================================
 let WebSocketLib = null;
 try {
-  const wsModule = await import("ws");
-  WebSocketLib = wsModule.default || wsModule.WebSocket || wsModule;
+  WebSocketLib = require("ws");
 } catch {
   WebSocketLib = null;
 }
@@ -835,10 +833,7 @@ function renderUI(preset = {}) {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP™ – Algorithmic Trading Platform Scanner</title>
-
-
-
+  <title>ALGTP™ – Scanner</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0d12; color:#e6e8ef;}
@@ -895,11 +890,8 @@ function renderUI(preset = {}) {
 <body>
 <header>
   <div class="wrap">
-   <h1>ALGTP™ – Algorithmic Trading Platform</h1>
-
-<div class="sub">
-  Smart Market Scanner • RTH / Pre / After • SMA / EMA / VWAP • HALT / RESUME • Alerts • Auto Refresh</div>
-
+    <h1>ALGTP™ – Scanner</h1>
+    <div class="sub">RTH • Pre/After • SMA/EMA/VWAP • HALT/RESUME • Alerts • Auto refresh • Click ticker for chart</div>
 
     <div class="nav">
       <a href="/ui" style="${active("/ui")}">Dashboard</a>
@@ -1542,7 +1534,7 @@ app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path:
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    mvessage: "ALGTP™ – Algorithmic Trading Platform running ✅",
+    message: "ALGTP™ – Algorithmic Trading Platform running ✅",
     ui: "/ui",
     endpoints: ["/scan", "/list", "/snapshot-all", "/premarket", "/aftermarket", "/halts"],
   });
@@ -1856,9 +1848,9 @@ app.get("/dividends", async (req, res) => {
 startHaltWebSocket();
 
 app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ – Algorithmic Trading Platform running http://localhost:${PORT}`);
-  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
-  console.log(`⛔ HALTS: http://localhost:${PORT}/halts`);
+  console.log(\`✅ ALGTP™ – Algorithmic Trading Platform running http://localhost:\${PORT}\`);
+  console.log(\`🚀 UI: http://localhost:\${PORT}/ui\`);
+  console.log(\`⛔ HALTS: http://localhost:\${PORT}/halts\`);
 });
 
 // ============================================================================

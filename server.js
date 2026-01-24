@@ -7,6 +7,187 @@ const axios = require("axios");
 
 const app = express();
 app.use(express.json());
+// ============================================================================
+// SECTION 19 — Clerk Auth Gate (Express) + Trial/Paywall
+// ============================================================================
+const { clerkMiddleware, getAuth } = require("@clerk/express");
+
+// NOTE: Clerk middleware must be mounted early (before your routes)
+app.use(clerkMiddleware());
+
+// ---------------- Simple in-memory access store (DEV only) ----------------
+// IMPORTANT: This resets on server restart (Render will reset too).
+// For production: store users in DB (Redis/Postgres/etc).
+const users = Object.create(null);
+
+// Trial config
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 3);
+const PAID_DAYS = Number(process.env.PAID_DAYS || 30);
+
+function msDays(d) {
+  return d * 24 * 60 * 60 * 1000;
+}
+
+function ensureUserTrial(userId) {
+  if (!userId) return;
+  if (!users[userId]) {
+    users[userId] = {
+      userId,
+      createdAt: Date.now(),
+      trialEndsAt: Date.now() + msDays(TRIAL_DAYS),
+      paidUntil: null,
+      source: "TRIAL",
+    };
+  }
+}
+
+function grantPaid30Days(userId, source = "STRIPE") {
+  if (!userId) return;
+  ensureUserTrial(userId);
+  const now = Date.now();
+  const base = users[userId].paidUntil && users[userId].paidUntil > now ? users[userId].paidUntil : now;
+  users[userId].paidUntil = base + msDays(PAID_DAYS);
+  users[userId].source = source;
+}
+
+function getAccess(userId) {
+  if (!userId) return { ok: false, reason: "NO_USER" };
+  ensureUserTrial(userId);
+
+  const u = users[userId];
+  const now = Date.now();
+  const paidOk = u.paidUntil !== null && u.paidUntil > now;
+  const trialOk = u.trialEndsAt !== null && u.trialEndsAt > now;
+
+  if (paidOk) return { ok: true, tier: "PAID", until: u.paidUntil };
+  if (trialOk) return { ok: true, tier: "TRIAL", until: u.trialEndsAt };
+
+  return { ok: false, reason: "EXPIRED", trialEndsAt: u.trialEndsAt, paidUntil: u.paidUntil };
+}
+
+// ---------------- Gate middleware ----------------
+app.use((req, res, next) => {
+  const p = String(req.path || "");
+
+  // Routes that require login + access
+  const needsGate =
+    p === "/ui" ||
+    p.startsWith("/ui/") ||
+    p === "/list" ||
+    p === "/scan" ||
+    p === "/snapshot-all" ||
+    p === "/premarket" ||
+    p === "/aftermarket" ||
+    p === "/halts";
+
+  // public routes
+  if (!needsGate) return next();
+
+  const { userId } = getAuth(req);
+
+  if (!userId) {
+    // Not logged in -> go login
+    return res.redirect(302, "/login");
+  }
+
+  // trial/paid logic (use userId key)
+  ensureUserTrial(userId);
+  const access = getAccess(userId);
+
+  if (access.ok) return next();
+
+  // expired -> paywall
+  return res.status(402).type("html").send(renderPaywallPage(access));
+});
+
+// ---------------- Login + Paywall pages ----------------
+function renderLoginPage() {
+  const pk = process.env.CLERK_PUBLISHABLE_KEY || "";
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP Login</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:560px;margin:10vh auto;padding:24px;border-radius:18px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+  </style>
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="${pk}"
+    src="https://js.clerk.com/v4/clerk.browser.js">
+  </script>
+</head>
+<body>
+  <div class="box">
+    <h2 style="margin:0 0 12px;text-align:center;">🔐 Login</h2>
+    <div id="clerk-signin"></div>
+  </div>
+
+  <script>
+    window.addEventListener("load", async () => {
+      await Clerk.load();
+      Clerk.mountSignIn(document.getElementById("clerk-signin"), {
+        afterSignInUrl: "/ui",
+        afterSignUpUrl: "/ui"
+      });
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function renderPaywallPage(access) {
+  const reason = access?.reason || "EXPIRED";
+  const trialEnds = access?.trialEndsAt ? new Date(access.trialEndsAt).toLocaleString() : "-";
+  const paidUntil = access?.paidUntil ? new Date(access.paidUntil).toLocaleString() : "-";
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ALGTP Paywall</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b0d12;color:#e6e8ef;font-family:system-ui}
+    .box{max-width:680px;margin:10vh auto;padding:24px;border-radius:18px;border:1px solid rgba(255,255,255,.14);background:rgba(18,24,43,.55)}
+    .muted{color:#a7adc2}
+    a.btn{display:inline-block;margin-top:12px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:#121622;color:#e6e8ef;text-decoration:none}
+    a.btn:hover{border-color:rgba(255,255,255,.28)}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2 style="margin:0 0 10px;">🔒 Access Required</h2>
+    <div class="muted">Reason: <b>${reason}</b></div>
+    <div class="muted">Trial ends: <b>${trialEnds}</b></div>
+    <div class="muted">Paid until: <b>${paidUntil}</b></div>
+
+    <p style="margin-top:14px;">
+      Your trial is over. Please upgrade to continue using ALGTP Scanner.
+    </p>
+
+    <!-- Replace this link with your real Stripe/Whop checkout -->
+    <a class="btn" href="/upgrade">Upgrade</a>
+    <a class="btn" href="/login">Back to Login</a>
+  </div>
+</body>
+</html>`;
+}
+
+// Public login route
+app.get("/login", (req, res) => res.type("html").send(renderLoginPage()));
+
+// Demo upgrade route (DEV ONLY): grant paid access for current user
+// Replace with Stripe webhook verification later.
+app.get("/upgrade", (req, res) => {
+  const { userId } = getAuth(req);
+  if (!userId) return res.redirect(302, "/login");
+  grantPaid30Days(userId, "MANUAL");
+  return res.redirect(302, "/ui");
+});
 
 // ============================================================================
 // SECTION 02 — ENV + Config

@@ -1624,6 +1624,121 @@ app.get("/dividends", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Dividends failed", detail: String(e?.message || e) });
   }
 });
+// ============================================================================
+// SECTION 18 — HALT/RESUME (WebSocket LULD 17/18) + API
+// ============================================================================
+const ENABLE_HALT_WS = String(process.env.ENABLE_HALT_WS || "true").toLowerCase() === "true";
+const MASSIVE_WS_URL = String(process.env.MASSIVE_WS_URL || "wss://socket.massive.com/stocks").trim();
+
+let WebSocketLib = null;
+try {
+  WebSocketLib = require("ws");
+} catch (e) {
+  // if ws not installed, keep null and scanner still works
+}
+
+const haltedMap = new Map(); // symbol -> { halted:boolean, lastEvent, tsMs, raw }
+function nowMs() { return Date.now(); }
+
+function setHalt(sym, raw) {
+  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: nowMs(), raw });
+}
+function setResume(sym, raw) {
+  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: nowMs(), raw });
+}
+function isHalted(sym) {
+  const x = haltedMap.get(sym);
+  return Boolean(x?.halted);
+}
+function haltBadge(sym) {
+  return isHalted(sym) ? "⛔" : "";
+}
+
+// Robust parse WS payloads
+function handleWsPayload(payload) {
+  const msgs = Array.isArray(payload) ? payload : [payload];
+
+  for (const m of msgs) {
+    if (!m || typeof m !== "object") continue;
+
+    const ev = String(m.ev || m.event || "").toUpperCase();
+    if (ev !== "LULD") continue;
+
+    const sym = String(m.T || m.ticker || m.sym || "").trim().toUpperCase();
+    if (!sym) continue;
+
+    const indicators = Array.isArray(m.i) ? m.i : Array.isArray(m.indicators) ? m.indicators : [];
+    const has17 = indicators.includes(17);
+    const has18 = indicators.includes(18);
+
+    if (has17) setHalt(sym, m);
+    if (has18) setResume(sym, m);
+  }
+}
+
+// Start WS (auth + subscribe LULD.*)
+function startHaltWebSocket() {
+  if (!ENABLE_HALT_WS) return;
+  if (!WebSocketLib) {
+    console.log("⚠️ ws package not installed. Run: npm i ws");
+    return;
+  }
+  if (!MASSIVE_API_KEY) {
+    console.log("⚠️ Missing MASSIVE_API_KEY. Halt WS disabled.");
+    return;
+  }
+
+  const ws = new WebSocketLib(MASSIVE_WS_URL);
+
+  ws.on("open", () => {
+    try {
+      // Many Massive WS servers accept auth message like this:
+      ws.send(JSON.stringify({ action: "auth", params: MASSIVE_API_KEY }));
+      ws.send(JSON.stringify({ action: "subscribe", params: "LULD.*" }));
+      console.log("✅ Halt WS connected + subscribed: LULD.*");
+    } catch (e) {
+      console.log("⚠️ Halt WS open error:", String(e?.message || e));
+    }
+  });
+
+  ws.on("message", (buf) => {
+    try {
+      const txt = buf.toString("utf8");
+      const parsed = JSON.parse(txt);
+      handleWsPayload(parsed);
+    } catch (e) {
+      // ignore non-json
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("⚠️ Halt WS closed. Reconnecting in 3s...");
+    setTimeout(startHaltWebSocket, 3000);
+  });
+
+  ws.on("error", (err) => {
+    console.log("⚠️ Halt WS error:", String(err?.message || err));
+  });
+}
+
+// API: view halted tickers
+app.get("/halts", (req, res) => {
+  const only = String(req.query.only || "halted").toLowerCase(); // halted|all
+  const out = [];
+  for (const [symbol, v] of haltedMap.entries()) {
+    if (only === "halted" && !v.halted) continue;
+    out.push({ symbol, ...v });
+  }
+  out.sort((a, b) => (b.tsMs ?? 0) - (a.tsMs ?? 0));
+  res.json({ ok: true, count: out.length, results: out.slice(0, 500) });
+});
+
+// Helper: attach halt flag to any row
+function attachHaltFlag(row) {
+  const sym = String(row?.symbol || "").trim().toUpperCase();
+  if (!sym) return row;
+  return { ...row, halted: isHalted(sym), haltIcon: haltBadge(sym) };
+}
 
 // ============================================================================
 // SECTION 17 — Listen

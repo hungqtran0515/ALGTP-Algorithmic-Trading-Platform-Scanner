@@ -1751,6 +1751,16 @@ function shouldFlash(sym){
   if (nowMs() > exp){ resumeFlash.delete(sym); return false; }
   return true;
 }
+  // update resume flash timers:
+  // if row is RESUMED recently, flash green for 8s
+  for (const r of rows){
+    if (!r || !r.symbol) continue;
+    const sym = String(r.symbol);
+    if (r.halted === false && r.lastEvent === "RESUME") {
+      // (nếu server có field lastEvent)
+      resumeFlash.set(sym, nowMs() + 8000);
+    }
+  }
 
 // ============================================================================
 // SECTION 17 — Listen

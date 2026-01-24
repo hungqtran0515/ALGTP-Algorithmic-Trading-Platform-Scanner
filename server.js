@@ -1425,7 +1425,7 @@ app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path:
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "ALGTP™ Scanner running ✅",
+    message: "ALGTP™ – Algorithmic Trading Platform running ✅",
     ui: "/ui",
     endpoints: ["/scan", "/list", "/snapshot-all", "/premarket", "/aftermarket", "/halts"],
   });

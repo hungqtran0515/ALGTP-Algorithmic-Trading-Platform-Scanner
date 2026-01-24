@@ -1,71 +1,20 @@
+// ============================================================================
+// SECTION 01 — Imports + App Init
+// ============================================================================
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const session = require("express-session");
-const passport = require("passport");
-const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
 const app = express();
-
-const PORT = Number(process.env.PORT || 3000);
-const IS_PROD = process.env.NODE_ENV === "production";
-
 app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
 
-if (IS_PROD) app.set("trust proxy", 1);
-
-app.use(
-  session({
-    name: "algtp.sid",
-    secret: process.env.SESSION_SECRET || "dev_secret_change_me",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: IS_PROD,
-      maxAge: 1000 * 60 * 60 * 24 * 14,
-    },
-  })
-);
-
-app.use(passport.initialize());
-app.use(passport.session());
-
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((obj, done) => done(null, obj));
-
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID || "",
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
-      callbackURL:
-        process.env.GOOGLE_CALLBACK_URL ||
-        `http://localhost:${PORT}/auth/google/callback`,
-    },
-    async (accessToken, refreshToken, profile, done) => {
-      const uid = `google:${profile.id}`;
-      const email = profile.emails?.[0]?.value || null;
-      const name = profile.displayName || null;
-      return done(null, { uid, email, name });
-    }
-  )
-);
-
-function requireLogin(req, res, next) {
-  const uid = req.session?.uid;
-  if (!uid) return res.redirect(302, "/login");
-  next();
-}
-
-
-// ---------------- ENV ----------------
+// ============================================================================
+// SECTION 02 — ENV + Config
+// ============================================================================
 const PORT = Number(process.env.PORT || 3000);
 
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
-const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
+const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim(); // query | xapi | bearer
 const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
 
 const MASSIVE_MOVER_URL = String(
@@ -76,17 +25,42 @@ const MASSIVE_TICKER_SNAPSHOT_URL = String(
   process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
+// Snapshot ALL tickers (for pre/after/snapshot-all scanners)
+// NOTE: per your .env screenshot you set it to .../tickers
+const MASSIVE_SNAPSHOT_ALL_URL = String(
+  process.env.MASSIVE_SNAPSHOT_ALL_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
+).trim();
+
+// Aggs for indicators
+const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
+const AGGS_INCLUDE_PREPOST = String(process.env.AGGS_INCLUDE_PREPOST || "true").toLowerCase() === "true";
+
+// Optional: dividends
+const MASSIVE_DIVIDENDS_URL = String(
+  process.env.MASSIVE_DIVIDENDS_URL || "https://api.massive.com/v3/reference/dividends"
+).trim();
+
 const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
 const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
 const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 
-// ---------------- helpers ----------------
+// Indicators toggle + limits
+const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
+const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
+
+// VWAP/Volume spike thresholds
+const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
+const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
+
+// ============================================================================
+// SECTION 03 — Helpers (envMissing/auth/parse/n/round2/clamp/mapPool)
+// ============================================================================
 function envMissing() {
   const miss = [];
   if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
   if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
   if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
-  // NOTICE(ADD): add missing env for aggs endpoint
+  if (!MASSIVE_SNAPSHOT_ALL_URL) miss.push("MASSIVE_SNAPSHOT_ALL_URL");
   if (!MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
   return miss;
 }
@@ -142,7 +116,9 @@ async function mapPool(items, concurrency, fn) {
   return out;
 }
 
-// ---------------- scoring (icon + alerts) ----------------
+// ============================================================================
+// SECTION 04 — Scoring + Icons
+// ============================================================================
 function demandScore(row) {
   const gap = Math.abs(n(row?.gapPct) ?? 0);
   const pc = Math.abs(n(row?.pricePct) ?? 0);
@@ -154,8 +130,12 @@ function demandScore(row) {
   if (pc >= 10) s += 1;
   if (pc >= 20) s += 1;
 
+  // small bonus if above vwap + vol spike (pre/after as well)
+  if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
+
   return clamp(s, 0, 5);
 }
+
 function signalIcon(d) {
   if (d >= 5) return "🚀";
   if (d >= 4) return "🔥";
@@ -163,9 +143,8 @@ function signalIcon(d) {
   return "⛔️";
 }
 
-// NOTICE(ADD): 5m VWAP/Volume/PriceAction signal icon
+// price action / volume above vwap => alert + icon
 function paSignalIcon(row) {
-  // price action / volume above vwap => alert + icon
   const above = Boolean(row?.aboveVWAP_5m);
   const volSpike = Boolean(row?.volSpike_5m);
   if (above && volSpike) return "🚨";
@@ -174,7 +153,9 @@ function paSignalIcon(row) {
   return "";
 }
 
-// ---------------- axios safe ----------------
+// ============================================================================
+// SECTION 05 — Axios Safe Layer
+// ============================================================================
 function axiosFail(e) {
   if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
 
@@ -204,7 +185,9 @@ async function safeGet(url, { params, headers }) {
   }
 }
 
-// ---------------- Massive calls ----------------
+// ============================================================================
+// SECTION 06 — Massive Calls (Movers / Ticker Snapshot / Snapshot ALL)
+// ============================================================================
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
   const directionSafe = d === "losers" ? "losers" : "gainers";
@@ -249,7 +232,35 @@ async function fetchTickerSnapshot(ticker) {
   return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
 }
 
-// ---------------- auto-detect fields ----------------
+async function fetchSnapshotAll() {
+  const url = MASSIVE_SNAPSHOT_ALL_URL.replace(/\/+$/, "");
+  const params = {};
+  const headers = {};
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+
+  const rows = Array.isArray(r.data?.tickers)
+    ? r.data.tickers
+    : Array.isArray(r.data?.results)
+    ? r.data.results
+    : Array.isArray(r.data?.data)
+    ? r.data.data
+    : null;
+
+  return {
+    ok: r.ok && Array.isArray(rows),
+    url,
+    status: r.status,
+    rows: Array.isArray(rows) ? rows : [],
+    sample: Array.isArray(rows) ? rows[0] : r.data,
+    errorDetail: r.errorDetail,
+  };
+}
+
+// ============================================================================
+// SECTION 07 — Auto-detect Fields + Normalize Snapshot
+// ============================================================================
 function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
   if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
 
@@ -391,7 +402,7 @@ function normalizeSnapshotAuto(ticker, snap) {
     floatShares = ff.value;
   }
 
-  // Market cap
+  // Market cap (may be missing on some snapshot endpoints)
   let marketCap =
     n(root?.marketCap) ??
     n(root?.marketcap) ??
@@ -414,6 +425,10 @@ function normalizeSnapshotAuto(ticker, snap) {
     marketCap = mc.value;
   }
 
+  // NOTICE(ADD): fallback marketCap estimate (helps mid/big filter)
+  const marketCapEst = marketCap === null && price !== null && floatShares !== null ? price * floatShares : null;
+  const marketCapFinal = marketCap ?? marketCapEst;
+
   return {
     symbol: String(ticker || "").trim().toUpperCase(),
     price: price !== null ? round2(price) : null,
@@ -425,13 +440,16 @@ function normalizeSnapshotAuto(ticker, snap) {
     floatM: floatShares !== null ? round2(floatShares / 1_000_000) : null,
     floatCat: floatCategory(floatShares),
 
-    marketCap: marketCap !== null ? Math.round(marketCap) : null,
-    marketCapB: marketCap !== null ? round2(marketCap / 1_000_000_000) : null,
-    cap: capCategory(marketCap),
+    marketCap: marketCapFinal !== null ? Math.round(marketCapFinal) : null,
+    marketCapB: marketCapFinal !== null ? round2(marketCapFinal / 1_000_000_000) : null,
+    cap: capCategory(marketCapFinal),
+    marketCapSource: marketCap !== null ? "api" : marketCapEst !== null ? "est_float" : null,
   };
 }
 
-// ---------------- group + sorting ----------------
+// ============================================================================
+// SECTION 08 — Grouping + Sorting
+// ============================================================================
 function groupToDirection(group) {
   if (group === "topLosers") return "losers";
   return "gainers";
@@ -452,20 +470,9 @@ function capPass(row, cap) {
   return row.cap === c;
 }
 
-// -----------------------------------------------------------------------------
-// NOTICE(ADD): 5m aggregates endpoint for indicators (SMA/EMA/VWAP)
-// -----------------------------------------------------------------------------
-const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
-
-// NOTICE(ADD): indicators toggle + bars limit
-const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
-const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
-
-// NOTICE(ADD): VWAP alert thresholds (volume spike)
-const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
-const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
-
-// NOTICE(ADD): Indicators (SMA/EMA/VWAP) computed from 5m bars
+// ============================================================================
+// SECTION 09 — Aggs 5m Indicators (SMA/EMA/VWAP) + Cache
+// ============================================================================
 function computeSMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
   let sum = 0;
@@ -476,8 +483,6 @@ function computeSMA(closes, len) {
 function computeEMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
   const k = 2 / (len + 1);
-
-  // closes must be chronological (oldest -> newest)
   const seed = computeSMA(closes.slice(0, len), len);
   if (seed === null) return null;
 
@@ -488,10 +493,8 @@ function computeEMA(closes, len) {
   return ema;
 }
 
-// VWAP: sum(close * volume) / sum(volume)
 function computeVWAP(closes, volumes) {
-  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length)
-    return null;
+  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length) return null;
   let pv = 0;
   let vv = 0;
   for (let i = 0; i < closes.length; i++) {
@@ -520,7 +523,6 @@ function computeAvg(arr) {
 }
 
 function indicatorsFromAggs5m(barsDesc) {
-  // barsDesc usually newest first (sort=desc)
   if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
     return {
       sma26_5m: null,
@@ -537,22 +539,19 @@ function indicatorsFromAggs5m(barsDesc) {
     .map((b) => ({
       c: n(b?.c ?? b?.close),
       v: n(b?.v ?? b?.volume),
-      vw: n(b?.vw), // if API provides bar vwap
+      vw: n(b?.vw),
       t: n(b?.t) ?? null,
     }))
     .filter((x) => x.c !== null)
-    .slice(0, 400);
+    .slice(0, 600);
 
   const barsChrono = [...bars].reverse(); // oldest -> newest
   const closes = barsChrono.map((x) => x.c);
   const vols = barsChrono.map((x) => x.v ?? 0);
 
-  const last26 = closes.slice(-26);
-  const sma26 = last26.length === 26 ? computeSMA(last26, 26) : null;
-
+  const sma26 = closes.length >= 26 ? computeSMA(closes.slice(-26), 26) : null;
   const ema9 = computeEMA(closes, 9);
   const ema34 = computeEMA(closes, 34);
-
   const vwap = computeVWAP(closes, vols);
 
   const lastBar = barsChrono[barsChrono.length - 1] || null;
@@ -572,7 +571,6 @@ function indicatorsFromAggs5m(barsDesc) {
   };
 }
 
-// NOTICE(ADD): 5m aggregates fetch + small in-memory cache
 const aggsCache = new Map(); // key: "TICKER|5m" -> { ts, bars }
 
 function ymd(d) {
@@ -588,24 +586,22 @@ async function fetchAggs5m(ticker) {
   const cacheKey = `${sym}|5m`;
   const now = Date.now();
 
-  // cache 25s (UI refresh default 30s)
+  // cache 25s
   const hit = aggsCache.get(cacheKey);
   if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
 
   const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
-
-  // window đủ cho EMA34 + SMA26 (lấy ~5 ngày)
   const to = ymd(new Date());
   const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
-
   const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
 
   const params = { adjusted: "true", sort: "desc", limit: String(AGGS_5M_LIMIT) };
+  if (AGGS_INCLUDE_PREPOST) params.includePrePost = "true";
+
   const headers = {};
   const a = auth(params, headers);
 
   const r = await safeGet(url, { params: a.params, headers: a.headers });
-
   const bars = Array.isArray(r.data?.results) ? r.data.results : [];
   const ok = r.ok && bars.length > 0;
 
@@ -614,7 +610,6 @@ async function fetchAggs5m(ticker) {
   return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
 }
 
-// NOTICE(ADD): derive VWAP alerts for 5m
 function attach5mSignals(row) {
   const price = n(row?.price);
   const vwap = n(row?.vwap_5m);
@@ -631,7 +626,59 @@ function attach5mSignals(row) {
   };
 }
 
-// ---------------- UI ----------------
+// ============================================================================
+// SECTION 10 — Session Utils (Pre/RTH/After) for Snapshot-All filters
+// ============================================================================
+function toMs(ts) {
+  const x = n(ts);
+  if (x === null) return null;
+  if (x > 1e14) return Math.floor(x / 1e6); // ns -> ms
+  if (x > 1e12) return Math.floor(x);       // ms
+  if (x > 1e9) return Math.floor(x * 1000); // seconds -> ms
+  return null;
+}
+
+function nyHM(ms) {
+  try {
+    const d = new Date(ms);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(d);
+    const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+    const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+    return { h, m };
+  } catch {
+    return { h: 0, m: 0 };
+  }
+}
+
+function sessionOfMs(ms) {
+  const { h, m } = nyHM(ms);
+  const mins = h * 60 + m;
+  if (mins >= 4 * 60 && mins < 9 * 60 + 30) return "pre";
+  if (mins >= 9 * 60 + 30 && mins < 16 * 60) return "rth";
+  if (mins >= 16 * 60 && mins < 20 * 60) return "after";
+  return "off";
+}
+
+function snapshotTs(snap) {
+  const t = snap?.lastTrade?.t ?? snap?.lastQuote?.t ?? snap?.updated ?? null;
+  return toMs(t);
+}
+
+function addExtPct(row, rawSnap) {
+  const prevClose = n(rawSnap?.prevDay?.c ?? rawSnap?.prevDay?.close) ?? null;
+  const price = n(row?.price) ?? null;
+  const extPct = price !== null && prevClose !== null && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null;
+  return { ...row, extPct: extPct !== null ? round2(extPct) : null };
+}
+
+// ============================================================================
+// SECTION 11 — UI Renderer (renderUI)
+// ============================================================================
 function renderUI(preset = {}) {
   const presetGroup = preset.group || "topGainers";
   const presetCap = preset.cap || "all";
@@ -654,9 +701,11 @@ function renderUI(preset = {}) {
     .sub { margin-top:6px; font-size:12px; color:#a7adc2; }
     .wrap { max-width:1400px; margin:0 auto; }
     .panel { padding:14px 18px; border-bottom:1px solid rgba(255,255,255,.06); }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    select, input, button { background:#121622; border:1px solid rgba(255,255,255,.12); color:#e6e8ef; border-radius:10px; padding:10px 12px; font-size:13px; outline:none; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    select, input, button { background:#121622; border:1px solid rgba(255,255,255,.12); color:#e6e8ef; border-radius:12px; padding:9px 10px; font-size:13px; outline:none; }
     input { min-width:220px; }
+    #symbols { min-width:240px; flex:1; }
+    #minGap { min-width:200px; }
     button { cursor:pointer; }
     button:hover { border-color: rgba(255,255,255,.22); }
     .hint { font-size:12px; color:#a7adc2; margin-top:8px; }
@@ -677,7 +726,7 @@ function renderUI(preset = {}) {
     .nav a { text-decoration:none; color:#c8cde0; background:#121622; border:1px solid rgba(255,255,255,.12); padding:8px 10px; border-radius:999px; font-size:12px; }
     .nav a:hover { border-color: rgba(255,255,255,.22); }
     .watermark{ position: fixed; bottom: 12px; right: 16px; font-size: 11px; color: rgba(230,232,239,.35); letter-spacing: .3px; pointer-events: none; user-select: none; z-index: 9999; }
-    .pill { display:inline-flex; align-items:center; gap:8px; padding:8px 10px; border-radius:999px; background:#121622; border:1px solid rgba(255,255,255,.12); font-size:12px; color:#c8cde0; }
+    .pill { display:inline-flex; align-items:center; gap:8px; padding:7px 10px; border-radius:999px; background:#121622; border:1px solid rgba(255,255,255,.12); font-size:12px; color:#c8cde0; }
     .pill input[type="checkbox"]{ transform: translateY(1px); }
     .symLink { color:#e6e8ef; text-decoration:none; border-bottom:1px dashed rgba(255,255,255,.25); cursor:pointer; }
     .symLink:hover { border-bottom-color: rgba(255,255,255,.55); }
@@ -697,7 +746,7 @@ function renderUI(preset = {}) {
 <header>
   <div class="wrap">
     <h1>ALGTP™ – Algorithmic Trading Platform Scanner</h1>
-    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Alerts • Auto Refresh • Scan Symbols • Click ticker for chart • 5m SMA/EMA/VWAP</div>
+    <div class="sub">Gainers • Losers • Gappers • Small/Mid/Big Cap • Pre/After • Alerts • Auto Refresh • Scan Symbols • Click ticker for chart</div>
 
     <div class="nav">
       <a href="/ui" style="${active("/ui")}">Dashboard</a>
@@ -707,6 +756,9 @@ function renderUI(preset = {}) {
       <a href="/ui/smallcap" style="${active("/ui/smallcap")}">Small Cap</a>
       <a href="/ui/midcap" style="${active("/ui/midcap")}">Mid Cap</a>
       <a href="/ui/bigcap" style="${active("/ui/bigcap")}">Big Cap</a>
+      <a href="/ui/premarket" style="${active("/ui/premarket")}">Pre-Market</a>
+      <a href="/ui/aftermarket" style="${active("/ui/aftermarket")}">After-Hours</a>
+      <a href="/ui/snapshot-all" style="${active("/ui/snapshot-all")}">Snapshot-All</a>
     </div>
   </div>
 </header>
@@ -725,6 +777,9 @@ function renderUI(preset = {}) {
         <option value="topGainers">Top Gainers</option>
         <option value="topLosers">Top Losers</option>
         <option value="topGappers">Top Gappers</option>
+        <option value="premarket">Pre-Market (Snapshot)</option>
+        <option value="aftermarket">After-Hours (Snapshot)</option>
+        <option value="snapshotAll">Snapshot-All (All tickers)</option>
       </select>
 
       <select id="cap">
@@ -735,7 +790,7 @@ function renderUI(preset = {}) {
       </select>
 
       <select id="limit">
-        <option>20</option><option>30</option><option>50</option><option>100</option><option>150</option>
+        <option>20</option><option>30</option><option selected>50</option><option>100</option><option>150</option>
       </select>
 
       <input id="minGap" placeholder="minGap% (only for Gappers, ex: 10)" />
@@ -751,11 +806,13 @@ function renderUI(preset = {}) {
       <span class="pill"><input id="soundOn" type="checkbox" checked /> Sound</span>
       <span class="pill"><input id="desktopOn" type="checkbox" checked /> Desktop</span>
 
+      <span class="pill"><input id="openNewWin" type="checkbox" /> Open new window</span>
+      <span class="pill"><input id="openNewTab" type="checkbox" checked /> New tab</span>
+
       <input id="alertScore" placeholder="Alert score >= (default 4)" style="min-width:180px;" />
       <input id="alertGap" placeholder="Alert gap% >= (default 20)" style="min-width:180px;" />
       <input id="alertPrice" placeholder="Alert price% >= (default 20)" style="min-width:200px;" />
 
-      <!-- NOTICE(ADD): 5m VWAP/Volume alert thresholds -->
       <input id="alertAboveVWAP" placeholder="Alert if Price > VWAP (5m): 1/0 (default 1)" style="min-width:260px;" />
       <input id="alertVolSpike" placeholder="Alert if VolSpike (5m): 1/0 (default 1)" style="min-width:260px;" />
 
@@ -771,8 +828,8 @@ function renderUI(preset = {}) {
     </div>
 
     <div class="hint">
-      Click any ticker to open a TradingView chart. If a symbol does not load, switch exchange in the chart (NASDAQ/NYSE/AMEX).
-      <br/>5m indicators used: <b>SMA26</b>, <b>EMA9</b>, <b>EMA34</b>, <b>VWAP</b>. Alerts will fire when Price&gt;VWAP and/or 5m volume spike.
+      Click any ticker to open a TradingView chart (modal) or enable "Open new window" (or Ctrl/Cmd+Click).
+      <br/>Indicators: <b>SMA26</b>, <b>EMA9</b>, <b>EMA34</b>, <b>VWAP</b> from 5m aggs. Pre/After uses snapshot-all + indicators.
     </div>
 
     <div class="err" id="errBox"></div>
@@ -902,7 +959,7 @@ function shouldAlertRow(r, cfg){
 
   const score = Number(r.demandScore ?? 0);
   const gap = Number(r.gapPct ?? 0);
-  const pc = Number(r.pricePct ?? 0);
+  const pc = Number(r.pricePct ?? r.extPct ?? 0);
 
   const aboveVWAP = Boolean(r.aboveVWAP_5m);
   const volSpike = Boolean(r.volSpike_5m);
@@ -916,11 +973,11 @@ function fireAlert(r, cfg){
   alerted.add(r.symbol);
   const parts = [];
   if (r.pricePct != null) parts.push(\`Price%: \${r.pricePct}%\`);
+  if (r.extPct != null) parts.push(\`Ext%: \${r.extPct}%\`);
   if (r.gapPct != null) parts.push(\`Gap%: \${r.gapPct}%\`);
   if (r.floatM != null) parts.push(\`Float(M): \${r.floatM}\`);
   if (r.marketCapB != null) parts.push(\`MCap(B): \${r.marketCapB}\`);
 
-  // NOTICE(ADD): 5m indicators + VWAP signals in alert body
   if (r.sma26_5m != null) parts.push(\`SMA26(5m): \${r.sma26_5m}\`);
   if (r.ema9_5m != null) parts.push(\`EMA9(5m): \${r.ema9_5m}\`);
   if (r.ema34_5m != null) parts.push(\`EMA34(5m): \${r.ema34_5m}\`);
@@ -952,7 +1009,7 @@ async function enableNotifications(){
   }
 }
 
-// -------- Chart Modal (click ticker) --------
+// -------- Chart Modal / New Window --------
 const modalBack = byId("modalBack");
 const modalTitle = byId("modalTitle");
 const chartBox = byId("chartBox");
@@ -973,6 +1030,11 @@ function closeModal(){
 function buildTvSymbol(sym){
   const ex = exSel.value || "NASDAQ";
   return ex + ":" + sym;
+}
+function tvUrlFor(sym){
+  const tvSymbol = buildTvSymbol(sym);
+  const interval = tfSel.value || "5";
+  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol) + "&interval=" + encodeURIComponent(interval);
 }
 function renderChart(sym){
   if (!window.TradingView || !window.TradingView.widget){
@@ -1006,6 +1068,19 @@ function openChart(sym){
   openModal();
   renderChart(sym);
 }
+function handleTickerClick(ev, sym){
+  const forceNew = byId("openNewWin")?.checked;
+  const modifier = ev && (ev.ctrlKey || ev.metaKey);
+
+  if (forceNew || modifier){
+    const url = tvUrlFor(sym);
+    const newTab = byId("openNewTab")?.checked !== false;
+    if (newTab) window.open(url, "_blank", "noopener,noreferrer");
+    else window.location.href = url;
+    return;
+  }
+  openChart(sym);
+}
 
 byId("closeBtn").addEventListener("click", closeModal);
 modalBack.addEventListener("click", (e)=>{ if (e.target === modalBack) closeModal(); });
@@ -1035,6 +1110,7 @@ function renderList(data){
             <th>Symbol</th>
             <th class="right">Price</th>
             <th class="right">Price%</th>
+            <th class="right">Ext%</th>
             <th class="right">Gap%</th>
             <th class="right">Vol</th>
             <th class="right">Float(M)</th>
@@ -1054,10 +1130,11 @@ function renderList(data){
               <td>\${r.signalIcon || ""}</td>
               <td>\${r.paIcon || ""}</td>
               <td class="mono">
-                <a class="symLink" href="javascript:void(0)" onclick="openChart('\${String(r.symbol||"").replace(/'/g,"") }')">\${r.symbol || ""}</a>
+                <a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'\${String(r.symbol||"").replace(/'/g,"")}')">\${r.symbol || ""}</a>
               </td>
               <td class="right mono">\${fmtNum(r.price)}</td>
               <td class="right mono">\${fmtNum(r.pricePct)}%</td>
+              <td class="right mono">\${fmtNum(r.extPct)}%</td>
               <td class="right mono">\${fmtNum(r.gapPct)}%</td>
               <td class="right mono">\${fmtInt(r.volume)}</td>
               <td class="right mono">\${fmtNum(r.floatM)}</td>
@@ -1134,8 +1211,16 @@ async function run(){
     const limit = byId("limit").value;
     const minGap = byId("minGap").value.trim();
 
-    url = \`/list?group=\${encodeURIComponent(group)}&cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
-    if (minGap) url += \`&minGap=\${encodeURIComponent(minGap)}\`;
+    if (group === "premarket") {
+      url = \`/premarket?cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
+    } else if (group === "aftermarket") {
+      url = \`/aftermarket?cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
+    } else if (group === "snapshotAll") {
+      url = \`/snapshot-all?cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
+    } else {
+      url = \`/list?group=\${encodeURIComponent(group)}&cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
+      if (minGap) url += \`&minGap=\${encodeURIComponent(minGap)}\`;
+    }
   }
 
   try{
@@ -1172,7 +1257,6 @@ function setPreset(){
   byId("alertScore").value = "4";
   byId("alertGap").value = "20";
   byId("alertPrice").value = "20";
-
   byId("alertAboveVWAP").value = "1";
   byId("alertVolSpike").value = "1";
 
@@ -1199,35 +1283,49 @@ run();
 </html>`;
 }
 
-// ---------------- UI routes ----------------
+// ============================================================================
+// SECTION 12 — UI Routes
+// ============================================================================
 app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 50 })));
-app.get("/ui/gainers", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 50 }))
-);
-app.get("/ui/losers", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 50 }))
-);
-app.get("/ui/gappers", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/gappers", group: "topGappers", cap: "all", limit: 80, minGap: 10 }))
-);
-app.get("/ui/smallcap", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/smallcap", group: "topGainers", cap: "small", limit: 80 }))
-);
-app.get("/ui/midcap", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80 }))
-);
-app.get("/ui/bigcap", (req, res) =>
-  res.type("html").send(renderUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80 }))
-);
+app.get("/ui/gainers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 50 })));
+app.get("/ui/losers", (req, res) => res.type("html").send(renderUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 50 })));
+app.get("/ui/gappers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gappers", group: "topGappers", cap: "all", limit: 80, minGap: 10 })));
+app.get("/ui/smallcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/smallcap", group: "topGainers", cap: "small", limit: 80 })));
+app.get("/ui/midcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80 })));
+app.get("/ui/bigcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80 })));
 
-// ---------------- API routes ----------------
+// session pages (reuse same UI)
+app.get("/ui/premarket", (req, res) => res.type("html").send(renderUI({ path: "/ui/premarket", group: "premarket", cap: "all", limit: 80 })));
+app.get("/ui/aftermarket", (req, res) => res.type("html").send(renderUI({ path: "/ui/aftermarket", group: "aftermarket", cap: "all", limit: 80 })));
+app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path: "/ui/snapshot-all", group: "snapshotAll", cap: "all", limit: 100 })));
+
+// ============================================================================
+// SECTION 13 — Base API Routes
+// ============================================================================
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: "ALGTP™ – Algorithmic Trading Platform Scanner running ✅",
     ui: "/ui",
-    pages: ["/ui", "/ui/gainers", "/ui/losers", "/ui/gappers", "/ui/smallcap", "/ui/midcap", "/ui/bigcap"],
-    examples: ["/list?group=topGappers&limit=80&cap=all&minGap=10", "/scan?symbols=NVDA,TSLA,AAPL"],
+    pages: [
+      "/ui",
+      "/ui/gainers",
+      "/ui/losers",
+      "/ui/gappers",
+      "/ui/smallcap",
+      "/ui/midcap",
+      "/ui/bigcap",
+      "/ui/premarket",
+      "/ui/aftermarket",
+      "/ui/snapshot-all",
+    ],
+    examples: [
+      "/list?group=topGappers&limit=80&cap=all&minGap=10",
+      "/scan?symbols=NVDA,TSLA,AAPL",
+      "/premarket?cap=all&limit=80",
+      "/aftermarket?cap=all&limit=80",
+      "/snapshot-all?cap=all&limit=100",
+    ],
   });
 });
 
@@ -1241,12 +1339,12 @@ app.get("/api", (req, res) => {
       queryKeyName: MASSIVE_QUERY_KEYNAME,
       moverUrl: MASSIVE_MOVER_URL,
       tickerSnapshotUrl: MASSIVE_TICKER_SNAPSHOT_URL,
+      snapshotAllUrl: MASSIVE_SNAPSHOT_ALL_URL,
+      aggsUrl: MASSIVE_AGGS_URL,
+      includePrePost: AGGS_INCLUDE_PREPOST,
       includeOtc: INCLUDE_OTC,
       snapConcurrency: SNAP_CONCURRENCY,
       debug: DEBUG,
-
-      // NOTICE(ADD)
-      aggsUrl: MASSIVE_AGGS_URL,
       enable5mIndicators: ENABLE_5M_INDICATORS,
       aggs5mLimit: AGGS_5M_LIMIT,
       volSpikeMult: VOL_SPIKE_MULT,
@@ -1255,23 +1353,9 @@ app.get("/api", (req, res) => {
   });
 });
 
-app.get("/env", (req, res) => {
-  res.json({
-    ok: true,
-    hasKey: Boolean(MASSIVE_API_KEY),
-    authType: MASSIVE_AUTH_TYPE,
-    queryKeyName: MASSIVE_QUERY_KEYNAME,
-    moverBase: MASSIVE_MOVER_URL,
-    tickerBase: MASSIVE_TICKER_SNAPSHOT_URL,
-
-    // NOTICE(ADD)
-    aggsBase: MASSIVE_AGGS_URL,
-    enable5mIndicators: ENABLE_5M_INDICATORS,
-    aggs5mLimit: AGGS_5M_LIMIT,
-  });
-});
-
-// Symbols scan endpoint (for TSLA/NVDA anytime)
+// ============================================================================
+// SECTION 14 — Main Scanner Endpoints (/scan, /list)
+// ============================================================================
 app.get("/scan", async (req, res) => {
   try {
     const miss = envMissing();
@@ -1289,7 +1373,6 @@ app.get("/scan", async (req, res) => {
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
 
-    // NOTICE(REPLACE+ADD): attach 5m indicators (SMA26/EMA9/EMA34/VWAP)
     const aggsErrors = [];
     if (ENABLE_5M_INDICATORS) {
       const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
@@ -1298,8 +1381,6 @@ app.get("/scan", async (req, res) => {
           aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
           return {
             symbol: r.symbol,
-            __aggsOk: false,
-            __aggsErr: a.errorDetail || { status: a.status, url: a.url },
             sma26_5m: null,
             ema9_5m: null,
             ema34_5m: null,
@@ -1309,8 +1390,7 @@ app.get("/scan", async (req, res) => {
             avgVol_5m: null,
           };
         }
-        const ii = indicatorsFromAggs5m(a.bars);
-        return { symbol: r.symbol, __aggsOk: true, ...ii };
+        return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
       });
 
       const mapInd = new Map(ind.map((x) => [x.symbol, x]));
@@ -1344,7 +1424,6 @@ app.get("/scan", async (req, res) => {
   }
 });
 
-// Group list endpoint
 app.get("/list", async (req, res) => {
   try {
     const miss = envMissing();
@@ -1362,7 +1441,7 @@ app.get("/list", async (req, res) => {
     const tickers = movers.rows
       .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
       .filter(Boolean)
-      .slice(0, limit);
+      .slice(0, limit * 3); // widen universe a bit so cap filter doesn't zero out
 
     const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
@@ -1373,29 +1452,23 @@ app.get("/list", async (req, res) => {
     const bad = snaps.filter((x) => !x.ok);
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+    rows = rows.filter((r) => capPass(r, cap));
 
-    // NOTICE(REPLACE+ADD): attach 5m indicators (SMA26/EMA9/EMA34/VWAP)
+    if (minGap !== null && Number.isFinite(minGap)) {
+      rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
+    }
+
+    rows = rows.slice(0, limit);
+
     const aggsErrors = [];
     if (ENABLE_5M_INDICATORS) {
       const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
         const a = await fetchAggs5m(r.symbol);
         if (!a.ok) {
           aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
-          return {
-            symbol: r.symbol,
-            __aggsOk: false,
-            __aggsErr: a.errorDetail || { status: a.status, url: a.url },
-            sma26_5m: null,
-            ema9_5m: null,
-            ema34_5m: null,
-            vwap_5m: null,
-            vwapBar_5m: null,
-            lastVol_5m: null,
-            avgVol_5m: null,
-          };
+          return { symbol: r.symbol, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
         }
-        const ii = indicatorsFromAggs5m(a.bars);
-        return { symbol: r.symbol, __aggsOk: true, ...ii };
+        return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
       });
 
       const mapInd = new Map(ind.map((x) => [x.symbol, x]));
@@ -1407,12 +1480,6 @@ app.get("/list", async (req, res) => {
       const d = demandScore(r);
       return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
     });
-
-    rows = rows.filter((r) => capPass(r, cap));
-
-    if (minGap !== null && Number.isFinite(minGap)) {
-      rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
-    }
 
     sortRowsByGroup(rows, group);
 
@@ -1433,12 +1500,136 @@ app.get("/list", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log("====================================");
-  console.log(`✅ ALGTP™ Server running: http://localhost:${PORT}`);
-  console.log(`🔐 Login:  http://localhost:${PORT}/login`);
-  console.log(`🚀 UI:     http://localhost:${PORT}/ui`);
-  console.log(`🔎 Scan:   http://localhost:${PORT}/scan?symbols=NVDA,TSLA,AAPL`);
-  console.log("====================================");
+// ============================================================================
+// SECTION 15 — Snapshot-All / Pre / After (API)
+// ============================================================================
+async function buildRowsFromSnapshotAll({ cap, limit, session }) {
+  const miss = envMissing();
+  if (miss.length) return { ok: false, status: 400, body: { ok: false, error: "Missing env", miss } };
+
+  const snap = await fetchSnapshotAll();
+  if (!snap.ok) return { ok: false, status: 500, body: { ok: false, error: "Snapshot-all failed", debug: snap } };
+
+  const raw = snap.rows
+    .map((x) => ({ snap: x, ticker: String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase() }))
+    .filter((x) => x.ticker);
+
+  let rows = raw.map((x) => addExtPct(normalizeSnapshotAuto(x.ticker, x.snap), x.snap));
+
+  if (session) {
+    rows = rows.filter((r) => {
+      const src = raw.find((x) => x.ticker === r.symbol)?.snap;
+      const ms = snapshotTs(src);
+      if (!ms) return false;
+      return sessionOfMs(ms) === session;
+    });
+  }
+
+  rows = rows.filter((r) => capPass(r, cap));
+
+  const aggsErrors = [];
+  if (ENABLE_5M_INDICATORS) {
+    const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
+      const a = await fetchAggs5m(r.symbol);
+      if (!a.ok) {
+        aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
+        return { symbol: r.symbol, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
+      }
+      return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
+    });
+
+    const mapInd = new Map(ind.map((x) => [x.symbol, x]));
+    rows = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
+    rows = rows.map((r) => ({ ...r, ...attach5mSignals(r) }));
+  }
+
+  rows = rows.map((r) => {
+    const d = demandScore(r);
+    return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
+  });
+
+  // pre/after: sort by extPct, then vol
+  rows.sort(
+    (a, b) =>
+      Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
+      Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0) ||
+      (b.volume ?? 0) - (a.volume ?? 0)
+  );
+
+  const lim = clamp(Number(limit || 100), 5, 500);
+  rows = rows.slice(0, lim);
+
+  return { ok: true, status: 200, body: { ok: true, results: rows, aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined } };
+}
+
+app.get("/snapshot-all", async (req, res) => {
+  const cap = String(req.query.cap || "all").toLowerCase();
+  const limit = req.query.limit;
+  const out = await buildRowsFromSnapshotAll({ cap, limit, session: null });
+  return res.status(out.status).json(out.body);
 });
 
+app.get("/premarket", async (req, res) => {
+  const cap = String(req.query.cap || "all").toLowerCase();
+  const limit = req.query.limit;
+  const out = await buildRowsFromSnapshotAll({ cap, limit, session: "pre" });
+  return res.status(out.status).json(out.body);
+});
+
+app.get("/aftermarket", async (req, res) => {
+  const cap = String(req.query.cap || "all").toLowerCase();
+  const limit = req.query.limit;
+  const out = await buildRowsFromSnapshotAll({ cap, limit, session: "after" });
+  return res.status(out.status).json(out.body);
+});
+
+// ============================================================================
+// SECTION 16 — Optional Dividends API
+// ============================================================================
+app.get("/dividends", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+
+    const ticker = String(req.query.ticker || "").trim().toUpperCase();
+    const limit = clamp(Number(req.query.limit || 50), 1, 1000);
+    const order = String(req.query.order || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+    const sort = String(req.query.sort || "ex_dividend_date").trim();
+
+    const url = MASSIVE_DIVIDENDS_URL.replace(/\/+$/, "");
+    const params = { limit: String(limit), order, sort };
+    if (ticker) params.ticker = ticker;
+
+    const headers = {};
+    const a = auth(params, headers);
+
+    const r = await safeGet(url, { params: a.params, headers: a.headers });
+
+    const rows =
+      Array.isArray(r.data?.results) ? r.data.results :
+      Array.isArray(r.data?.dividends) ? r.data.dividends :
+      Array.isArray(r.data?.data) ? r.data.data :
+      [];
+
+    return res.json({
+      ok: r.ok,
+      status: r.status,
+      ticker: ticker || null,
+      count: rows.length,
+      results: rows,
+      errorDetail: r.ok ? undefined : r.errorDetail,
+      rawSample: DEBUG ? r.data : undefined,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Dividends failed", detail: String(e?.message || e) });
+  }
+});
+
+// ============================================================================
+// SECTION 17 — Listen
+// ============================================================================
+app.listen(PORT, () => {
+  console.log(`✅ ALGTP™ Scanner running http://localhost:${PORT}`);
+  console.log(`🚀 UI: http://localhost:${PORT}/ui`);
+  console.log(`🔎 Symbols scan: /scan?symbols=NVDA,TSLA,AAPL`);
+});

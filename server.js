@@ -1,25 +1,20 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-
 const session = require("express-session");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
 const app = express();
 
-// =================== CONFIG ===================
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === "production";
 
-// body parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Render/Proxy + HTTPS: bắt buộc để cookie secure hoạt động đúng
 if (IS_PROD) app.set("trust proxy", 1);
 
-// =================== SESSION ===================
 app.use(
   session({
     name: "algtp.sid",
@@ -29,13 +24,12 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: IS_PROD, // local:false, prod(true HTTPS):true
+      secure: IS_PROD,
       maxAge: 1000 * 60 * 60 * 24 * 14,
     },
   })
 );
 
-// =================== PASSPORT ===================
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -60,142 +54,11 @@ passport.use(
   )
 );
 
-// =================== GATE MIDDLEWARE ===================
 function requireLogin(req, res, next) {
   const uid = req.session?.uid;
   if (!uid) return res.redirect(302, "/login");
   next();
 }
-
-// =================== LOGIN PAGE ===================
-function renderLoginPage() {
-  return `<!doctype html>
-<html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>ALGTP™ Login</title>
-<style>
-:root{color-scheme:dark}
-body{margin:0;min-height:100vh;display:grid;place-items:center;
-background:
-radial-gradient(900px 500px at 10% 10%, rgba(120,80,255,.25), transparent 60%),
-radial-gradient(900px 500px at 90% 20%, rgba(0,220,255,.18), transparent 55%),
-linear-gradient(180deg,#070912 0%,#0b0d12 55%,#070912 100%);
-color:#e6e8ef;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
-.card{width:min(520px,92vw);padding:22px;border-radius:22px;
-background:rgba(18,24,43,.55);border:1px solid rgba(255,255,255,.14);
-box-shadow:0 20px 60px rgba(0,0,0,.45);backdrop-filter: blur(12px)}
-.brand{display:flex;gap:12px;align-items:center;margin-bottom:14px}
-.logo{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;
-background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-size:20px}
-h1{margin:10px 0 8px;font-size:26px}
-p{margin:0 0 16px;opacity:.86;line-height:1.5}
-a.btn{display:flex;align-items:center;justify-content:space-between;
-text-decoration:none;color:#e6e8ef;width:100%;
-padding:12px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.16);
-background:linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06));
-box-shadow:0 10px 26px rgba(0,0,0,.35)}
-a.btn:hover{transform:translateY(-1px);filter:brightness(1.06)}
-.small{margin-top:12px;font-size:12.5px;opacity:.75}
-</style>
-</head><body>
-  <div class="card">
-    <div class="brand">
-      <div class="logo">🚀</div>
-      <div>
-        <div style="font-weight:800;letter-spacing:.3px">ALGTP™</div>
-        <div style="opacity:.75;font-size:12px;margin-top:2px">Algorithmic Trading Platform Scanner</div>
-      </div>
-    </div>
-
-    <h1>Sign in</h1>
-    <p>Login bằng Google để vào UI / Scan.</p>
-
-    <a class="btn" href="/auth/google">
-      <span style="display:flex;gap:10px;align-items:center">
-        <span style="width:34px;height:34px;border-radius:12px;display:grid;place-items:center;
-          background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.10);font-weight:900">G</span>
-        <span style="font-weight:800">Continue with Google</span>
-      </span>
-      <span style="font-weight:900;opacity:.85">→</span>
-    </a>
-
-    <div class="small">Secure sign-in • No password stored</div>
-  </div>
-</body></html>`;
-}
-
-app.get("/login", (req, res) => {
-  if (req.session?.uid) return res.redirect("/ui");
-  res.type("html").send(renderLoginPage());
-});
-
-// =================== AUTH ROUTES ===================
-app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
-
-app.get(
-  "/auth/google/callback",
-  passport.authenticate("google", { failureRedirect: "/login" }),
-  (req, res) => {
-    req.session.uid = req.user?.uid;
-    res.redirect("/ui");
-  }
-);
-
-app.post("/logout", (req, res) => {
-  req.session.destroy(() => {
-    res.clearCookie("algtp.sid");
-    res.redirect("/login");
-  });
-});
-
-// =================== ROOT ===================
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "ALGTP™ Server running ✅",
-    login: "/login",
-    ui: "/ui",
-    scan: "/scan?symbols=NVDA,TSLA,AAPL",
-    list: "/list?group=topGainers&cap=all&limit=50",
-  });
-});
-
-// =================== YOUR APP ROUTES (GATED) ===================
-// ✅ Thay 3 route này bằng code Massive/UI của mày.
-// Mẹo: chỉ cần thêm `requireLogin` vào trước handler là xong.
-
-// ===== /ui =====
-app.get("/ui", requireLogin, (req, res) => {
-  // ===== PASTE renderUI(...) CỦA MÀY Ở ĐÂY =====
-  // res.type("html").send(renderUI({ path:"/ui", group:"topGainers", cap:"all", limit:50 }));
-  res.type("html").send(`
-    <h1 style="font-family:system-ui">✅ Logged in</h1>
-    <p>uid: ${String(req.session.uid || "")}</p>
-    <form method="POST" action="/logout"><button>Logout</button></form>
-  `);
-});
-
-// ===== /scan =====
-app.get("/scan", requireLogin, async (req, res) => {
-  // ===== PASTE LOGIC /scan MASSIVE CỦA MÀY Ở ĐÂY =====
-  res.json({ ok: true, symbols: req.query.symbols || "NVDA,TSLA" });
-});
-
-// ===== /list =====
-app.get("/list", requireLogin, async (req, res) => {
-  // ===== PASTE LOGIC /list MASSIVE CỦA MÀY Ở ĐÂY =====
-  res.json({ ok: true, group: req.query.group || "topGainers" });
-});
-
-// =================== START ===================
-app.listen(PORT, () => {
-  console.log("====================================");
-  console.log(`✅ ALGTP running: http://localhost:${PORT}`);
-  console.log(`🔐 Login:        http://localhost:${PORT}/login`);
-  console.log(`🚀 UI:           http://localhost:${PORT}/ui`);
-  console.log(`🔎 Scan:         http://localhost:${PORT}/scan?symbols=NVDA,TSLA,AAPL`);
-  console.log("====================================");
-});
 
 
 // ---------------- ENV ----------------

@@ -6,6 +6,54 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
+const session = require("express-session");
+const passport = require("passport");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+
+// --- session ---
+app.use(
+  session({
+    name: "algtp.sid",
+    secret: process.env.SESSION_SECRET || "dev_secret_change_me",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false, // production HTTPS => true (hoặc set trust proxy bên dưới)
+      maxAge: 1000 * 60 * 60 * 24 * 14,
+    },
+  })
+);
+
+// Nếu deploy Render/Proxy + HTTPS, bật dòng này để cookie secure hoạt động ổn
+// app.set("trust proxy", 1);
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+// --- passport serialize ---
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((obj, done) => done(null, obj));
+
+// --- google strategy ---
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID || "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+      callbackURL: process.env.GOOGLE_CALLBACK_URL || "http://localhost:3000/auth/google/callback",
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      // uid ổn định: google:<id>
+      const uid = `google:${profile.id}`;
+      const email = profile.emails?.[0]?.value || null;
+      const name = profile.displayName || null;
+
+      return done(null, { uid, email, name });
+    }
+  )
+);
 
 "use client";
 

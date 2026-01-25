@@ -1,35 +1,30 @@
 // ============================================================================
-// 🔥 ALGTP™ — Massive Scanner (REST + WS HALT + WS AM fallback)
-// Single-file Node.js (ES Module)
+// 🔥 ALGTP™ — Massive Scanner (REST + WS HALT + WS AM fallback + Mini Chart Hover)
+// Single-file Node.js (CommonJS)
 // ----------------------------------------------------------------------------
 // UI:
 //  - /ui (+ tabs)
 // API:
 //  - /list, /scan, /snapshot-all, /premarket, /aftermarket, /halts, /api
+// Extra:
+//  - /mini-chart?symbol=AAPL&tf=1   (OHLC + ALGTP overlays for hover mini chart)
+// ----------------------------------------------------------------------------
+// Behavior:
+//  - Hover ticker: show mini chart inside UI (candles + EMA9/EMA34/SMA26/VWAP)
+//  - Click ticker: open TradingView platform in new tab
+//  - Risk popup: must agree every new tab/window (no persistence)
 // ----------------------------------------------------------------------------
 // Pre/After:
-//  - ENABLE_SNAPSHOT_ALL=true  => Snapshot-All (accurate)
-//  - ENABLE_SNAPSHOT_ALL=false => AM WS fallback + snapshot enrich cache
-// ----------------------------------------------------------------------------
-// TradingView:
-//  - Click ticker => modal chart (exchange + timeframe)
-//  - Ctrl/Cmd click OR "Open new tab" => open TradingView in new tab
-// ----------------------------------------------------------------------------
-// Risk Notice Popup:
-//  - Always show on page load (every new window)
-//  - Must check "I Understand & Agree" to continue (cannot dismiss otherwise)
+//  - ENABLE_SNAPSHOT_ALL=true  => Snapshot-All (accurate cap/float)
+//  - ENABLE_SNAPSHOT_ALL=false => AM WS fallback + REST snapshot enrich cache
 // ============================================================================
 
-import 'dotenv/config';
-import express from 'express';
-import axios from 'axios';
+import "dotenv/config";
+import express from "express";
+import axios from "axios";
+import WebSocket from "ws";
 
-let WebSocketLib = null;
-try {
-  WebSocketLib = (await import('ws')).default;
-} catch {
-  WebSocketLib = null;
-}
+const WebSocketLib = WebSocket;
 
 const app = express();
 app.use(express.json());
@@ -69,13 +64,13 @@ const MASSIVE_SNAPSHOT_ALL_URL = String(
 
 const ENABLE_SNAPSHOT_ALL = String(process.env.ENABLE_SNAPSHOT_ALL || "false").toLowerCase() === "true";
 
-// Aggs (5m indicators)
+// Aggs (for 5m indicators + mini chart)
 const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
 const AGGS_INCLUDE_PREPOST = String(process.env.AGGS_INCLUDE_PREPOST || "true").toLowerCase() === "true";
 
+// 5m indicators (table signals)
 const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
 const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
-
 const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
 const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
 
@@ -92,9 +87,12 @@ const ENABLE_AM_WS = String(process.env.ENABLE_AM_WS || "true").toLowerCase() ==
 const AM_WS_SUBS = String(process.env.AM_WS_SUBS || "AM.*").trim();
 const AM_CACHE_MAX = Math.max(200, Math.min(20000, Number(process.env.AM_CACHE_MAX || 8000)));
 
-// AM enrich snapshot cache (so cap filter still works when Snapshot-All OFF)
+// AM enrich cache (so cap filter can still work in fallback)
 const AM_ENRICH_LIMIT = Math.max(50, Math.min(500, Number(process.env.AM_ENRICH_LIMIT || 200)));
 const AM_ENRICH_TTL_MS = Math.max(5000, Math.min(300000, Number(process.env.AM_ENRICH_TTL_MS || 60000)));
+
+// Mini chart cache
+const MINI_CACHE_TTL_MS = Math.max(2000, Math.min(120000, Number(process.env.MINI_CACHE_TTL_MS || 15000)));
 
 if (!MASSIVE_API_KEY || !MASSIVE_MOVER_URL || !MASSIVE_TICKER_SNAPSHOT_URL) {
   console.error("❌ Missing ENV. Required:");
@@ -126,7 +124,7 @@ function auth(params = {}, headers = {}) {
 
   headers["user-agent"] =
     headers["user-agent"] ||
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36";
   return { params, headers };
 }
 
@@ -147,6 +145,7 @@ function parseSymbols(input) {
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
 }
+
 async function mapPool(items, concurrency, fn) {
   const out = new Array(items.length);
   let i = 0;
@@ -160,6 +159,7 @@ async function mapPool(items, concurrency, fn) {
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return out;
 }
+
 function ymd(d) {
   const x = new Date(d);
   const yyyy = x.getFullYear();
@@ -168,7 +168,7 @@ function ymd(d) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-// ===== Session time helpers (NY) =====
+// ===== Session time (NY) =====
 function toMs(ts) {
   const x = n(ts);
   if (x === null) return null;
@@ -180,12 +180,7 @@ function toMs(ts) {
 function nyHM(ms) {
   try {
     const d = new Date(ms);
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).formatToParts(d);
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d);
     const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
     const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
     return { h, m };
@@ -227,7 +222,7 @@ async function safeGet(url, { params, headers }) {
 }
 
 // ============================================================================
-// SECTION 04 — Massive REST Calls
+// SECTION 04 — Massive REST
 // ============================================================================
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
@@ -237,6 +232,7 @@ async function fetchMovers(direction = "gainers") {
 
   const params = {};
   if (INCLUDE_OTC) params.include_otc = "true";
+
   const a = auth(params, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
 
@@ -275,31 +271,34 @@ async function fetchSnapshotAll() {
   return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows, errorDetail: r.errorDetail };
 }
 
-// Aggs 5m
-const aggsCache = new Map(); // sym|5m -> {ts,bars}
-async function fetchAggs5m(ticker) {
-  const sym = String(ticker || "").trim().toUpperCase();
-  const cacheKey = `${sym}|5m`;
+// Aggs cache
+const aggsCache = new Map(); // sym|tf -> {ts, bars}
+async function fetchAggs(sym, tf = "1", limit = 300, sort = "asc") {
+  const ticker = String(sym || "").trim().toUpperCase();
+  const cacheKey = `${ticker}|${tf}|${sort}|${limit}`;
   const now = Date.now();
   const hit = aggsCache.get(cacheKey);
-  if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
+  if (hit && now - hit.ts < 15_000) return { ok: true, cached: true, bars: hit.bars };
 
   const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
   const to = ymd(new Date());
-  const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
-  const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
+  const from = ymd(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+  const url = `${base}/${encodeURIComponent(ticker)}/range/${encodeURIComponent(tf)}/minute/${from}/${to}`;
 
-  const params = { adjusted: "true", sort: "desc", limit: String(AGGS_5M_LIMIT) };
+  const params = { adjusted: "true", sort: String(sort), limit: String(limit) };
   if (AGGS_INCLUDE_PREPOST) params.includePrePost = "true";
 
   const a = auth(params, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
-
   const bars = Array.isArray(r.data?.results) ? r.data.results : [];
   const ok = r.ok && bars.length > 0;
   if (ok) aggsCache.set(cacheKey, { ts: now, bars });
 
   return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
+}
+
+async function fetchAggs5m(sym) {
+  return fetchAggs(sym, "5", AGGS_5M_LIMIT, "desc");
 }
 
 // ============================================================================
@@ -387,7 +386,6 @@ function normalizeSnapshotAuto(ticker, snap) {
   if (pricePct === null && price !== null && prevClose !== null && prevClose > 0) {
     pricePct = ((price - prevClose) / prevClose) * 100;
   }
-
   const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : null;
 
   let floatShares =
@@ -447,7 +445,7 @@ function capPass(row, cap) {
 }
 
 // ============================================================================
-// SECTION 06 — Signals (Score + Icons)
+// SECTION 06 — ALGTP Signals (Score + Icons)
 // ============================================================================
 function demandScore(row) {
   const gap = Math.abs(n(row?.gapPct) ?? 0);
@@ -479,7 +477,7 @@ function paSignalIcon(row) {
 }
 
 // ============================================================================
-// SECTION 07 — Indicators 5m (optional)
+// SECTION 07 — 5m Indicator engine (table)
 // ============================================================================
 function computeSMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
@@ -523,6 +521,7 @@ function indicatorsFromAggs5m(barsDesc) {
   if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
     return { sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
   }
+
   const bars = barsDesc
     .map((b) => ({ c: n(b?.c ?? b?.close), v: n(b?.v ?? b?.volume) }))
     .filter((x) => x.c !== null)
@@ -565,8 +564,8 @@ function attach5mSignals(row) {
 
 async function attachIndicatorsIfEnabled(rows) {
   if (!ENABLE_5M_INDICATORS) return { rows, aggsErrors: [] };
-  const aggsErrors = [];
 
+  const aggsErrors = [];
   const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
     const a = await fetchAggs5m(r.symbol);
     if (!a.ok) {
@@ -583,7 +582,7 @@ async function attachIndicatorsIfEnabled(rows) {
 }
 
 // ============================================================================
-// SECTION 08 — HALT WS (LULD)
+// SECTION 08 — HALT WS (LULD.*) + /halts
 // ============================================================================
 const haltedMap = new Map(); // sym -> { halted, lastEvent, tsMs, reason }
 function setHalt(sym) { haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: Date.now(), reason: "LULD" }); }
@@ -605,14 +604,12 @@ function handleLULD(payload) {
   }
 }
 
-let haltWs = null;
 function startHaltWebSocket() {
   if (!ENABLE_HALT_WS) return;
   if (!WebSocketLib) return console.log("⚠️ HALT WS disabled: npm i ws");
   if (!MASSIVE_API_KEY) return console.log("⚠️ HALT WS disabled: missing MASSIVE_API_KEY");
 
   const ws = new WebSocketLib(MASSIVE_WS_URL);
-  haltWs = ws;
   let subscribed = false;
 
   ws.on("open", () => {
@@ -667,8 +664,6 @@ app.get("/halts", (req, res) => {
 // SECTION 09 — AM WS (minute aggregates) + enrich cache
 // ============================================================================
 const amMap = new Map(); // sym -> AM payload
-let amWs = null;
-
 function trimAMCache() {
   if (amMap.size <= AM_CACHE_MAX) return;
   const arr = Array.from(amMap.entries());
@@ -676,7 +671,6 @@ function trimAMCache() {
   const drop = arr.length - AM_CACHE_MAX;
   for (let i = 0; i < drop; i++) amMap.delete(arr[i][0]);
 }
-
 function handleAMPayload(payload) {
   const msgs = Array.isArray(payload) ? payload : [payload];
   for (const m of msgs) {
@@ -691,14 +685,12 @@ function handleAMPayload(payload) {
     trimAMCache();
   }
 }
-
 function startAMWebSocket() {
   if (!ENABLE_AM_WS) return;
   if (!WebSocketLib) return console.log("⚠️ AM WS disabled: npm i ws");
   if (!MASSIVE_API_KEY) return console.log("⚠️ AM WS disabled: missing MASSIVE_API_KEY");
 
   const ws = new WebSocketLib(MASSIVE_WS_URL);
-  amWs = ws;
   let subscribed = false;
 
   ws.on("open", () => {
@@ -730,7 +722,7 @@ function startAMWebSocket() {
   ws.on("error", (err) => console.log("⚠️ AM WS error:", String(err?.message || err)));
 }
 
-// snapshot enrich cache for AM mode
+// enrich cache
 const amSnapCache = new Map(); // sym -> {ts,row}
 function getSnapCached(sym) {
   const hit = amSnapCache.get(sym);
@@ -862,7 +854,6 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
 }
 
 async function buildRowsFromAMCache({ cap, limit, session }) {
-  // Build base AM rows
   let base = [];
   for (const [sym, am] of amMap.entries()) {
     const ms = toMs(am?.e) || toMs(am?.s);
@@ -870,14 +861,10 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
     if (session && sessionOfMs(ms) !== session) continue;
     base.push(normalizeFromAMOnly(sym, am));
   }
-
   if (!base.length) return { ok: true, status: 200, body: { ok: true, source: "AM_WS", session, cap, results: [] } };
 
-  // Enrich top symbols with snapshots so cap filter works
   const needCap = String(cap || "all").toLowerCase() !== "all";
-  const candidates = [...base].sort(
-    (a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0)
-  );
+  const candidates = [...base].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0));
   const pick = candidates.slice(0, AM_ENRICH_LIMIT).map((x) => x.symbol);
 
   const toFetch = pick.filter((sym) => !getSnapCached(sym));
@@ -896,12 +883,10 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
     return snapRow ? mergeAMWithSnapshot(r, snapRow) : r;
   });
 
-  // cap filter: drop AM-only rows when cap requested
   if (needCap) rows = rows.filter((r) => capPass(r, cap));
 
   const lim = clamp(Number(limit || 100), 5, 500);
 
-  // attach indicators to top set only to keep fast
   rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
   rows = rows.slice(0, Math.max(lim * 2, 120));
 
@@ -920,14 +905,120 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
 }
 
 // ============================================================================
-// SECTION 11 — API Routes
+// SECTION 11 — Mini Chart endpoint (hover)
+// Returns OHLC + ALGTP overlays (EMA9/EMA34/SMA26/VWAP)
+// ============================================================================
+const miniCache = new Map(); // key -> {ts, payload}
+
+function smaSeries(values, len) {
+  const out = Array(values.length).fill(null);
+  if (values.length < len) return out;
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i];
+    if (i >= len) sum -= values[i - len];
+    if (i >= len - 1) out[i] = sum / len;
+  }
+  return out;
+}
+function emaSeries(values, len) {
+  const out = Array(values.length).fill(null);
+  if (values.length < len) return out;
+  const k = 2 / (len + 1);
+  let seed = 0;
+  for (let i = 0; i < len; i++) seed += values[i];
+  let e = seed / len;
+  out[len - 1] = e;
+  for (let i = len; i < values.length; i++) {
+    e = values[i] * k + e * (1 - k);
+    out[i] = e;
+  }
+  return out;
+}
+function vwapSeries(closes, vols) {
+  const out = Array(closes.length).fill(null);
+  let pv = 0, vv = 0;
+  for (let i = 0; i < closes.length; i++) {
+    const c = closes[i];
+    const v = vols[i] || 0;
+    pv += c * v;
+    vv += v;
+    out[i] = vv > 0 ? pv / vv : null;
+  }
+  return out;
+}
+
+app.get("/mini-chart", async (req, res) => {
+  try {
+    const sym = String(req.query.symbol || "").trim().toUpperCase();
+    const tf = String(req.query.tf || "1"); // minutes
+    if (!sym) return res.json({ ok: false, error: "symbol required" });
+
+    const key = `${sym}|${tf}`;
+    const hit = miniCache.get(key);
+    if (hit && Date.now() - hit.ts < MINI_CACHE_TTL_MS) return res.json(hit.payload);
+
+    const miss = envMissingFor({ needSnapshotAll: false, needAggs: true });
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+
+    const ag = await fetchAggs(sym, tf, 280, "asc");
+    if (!ag.ok) return res.json({ ok: false, error: "no bars", detail: ag.errorDetail });
+
+    const bars = ag.bars
+      .map((b) => ({
+        time: Math.floor((Number(b.t) || 0) / 1000),
+        open: n(b.o),
+        high: n(b.h),
+        low: n(b.l),
+        close: n(b.c),
+        volume: n(b.v) ?? 0,
+      }))
+      .filter((x) => x.time > 0 && x.open !== null && x.high !== null && x.low !== null && x.close !== null);
+
+    if (!bars.length) return res.json({ ok: false, error: "no bars" });
+
+    const closes = bars.map((x) => x.close);
+    const vols = bars.map((x) => x.volume);
+
+    const ema9 = emaSeries(closes, 9);
+    const ema34 = emaSeries(closes, 34);
+    const sma26 = smaSeries(closes, 26);
+    const vw = vwapSeries(closes, vols);
+
+    const toLine = (arr) =>
+      bars
+        .map((b, i) => (arr[i] == null ? null : { time: b.time, value: Number(arr[i].toFixed(4)) }))
+        .filter(Boolean);
+
+    const payload = {
+      ok: true,
+      symbol: sym,
+      tf,
+      ohlc: bars.map(({ volume, ...x }) => x),
+      overlays: {
+        ema9: toLine(ema9),
+        ema34: toLine(ema34),
+        sma26: toLine(sma26),
+        vwap: toLine(vw),
+      },
+    };
+
+    miniCache.set(key, { ts: Date.now(), payload });
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "mini-chart failed", detail: String(e?.message || e) });
+  }
+});
+
+// ============================================================================
+// SECTION 12 — API Routes
 // ============================================================================
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: `${BRAND.legal} running ✅`,
     ui: "/ui",
-    endpoints: ["/list", "/scan", "/snapshot-all", "/premarket", "/aftermarket", "/halts", "/api"],
+    endpoints: ["/list", "/scan", "/snapshot-all", "/premarket", "/aftermarket", "/mini-chart", "/halts", "/api"],
   });
 });
 
@@ -943,10 +1034,8 @@ app.get("/api", (req, res) => {
       amSubs: AM_WS_SUBS,
       amCacheSize: amMap.size,
       amSnapCacheSize: amSnapCache.size,
+      miniCacheSize: miniCache.size,
     },
-    envMissingCore: envMissingFor({ needSnapshotAll: false, needAggs: false }),
-    envMissingIfSnapshotAll: envMissingFor({ needSnapshotAll: true, needAggs: false }),
-    envMissingIfAggs: envMissingFor({ needSnapshotAll: false, needAggs: true }),
   });
 });
 
@@ -970,11 +1059,7 @@ app.get("/scan", async (req, res) => {
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
     rows = finalizeRows(withInd);
 
-    rows.sort(
-      (a, b) =>
-        (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
-        Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
-    );
+    rows.sort((a, b) => (b.demandScore ?? 0) - (a.demandScore ?? 0) || Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
 
     res.json({
       ok: true,
@@ -1026,7 +1111,6 @@ app.get("/list", async (req, res) => {
 
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
     rows = finalizeRows(withInd);
-
     sortRowsByGroup(rows, group);
 
     res.json({
@@ -1078,7 +1162,7 @@ app.get("/aftermarket", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 12 — UI + TradingView Modal + Risk Notice Popup
+// SECTION 13 — UI + Risk popup + Mini hover chart + Click open TradingView
 // ============================================================================
 function riskNoticeContent() {
   return {
@@ -1101,13 +1185,8 @@ function riskNoticeContent() {
 }
 
 function renderUI(preset = {}) {
-  const presetGroup = preset.group || "topGainers";
-  const presetCap = preset.cap || "all";
-  const presetLimit = preset.limit || 80;
-  const presetMinGap = preset.minGap ?? "";
-
-  const active = (path) => (preset.path === path ? "opacity:1" : "opacity:.70");
   const risk = riskNoticeContent();
+  const active = (path) => (preset.path === path ? "active" : "");
 
   return `<!doctype html>
 <html lang="en">
@@ -1158,17 +1237,6 @@ tr:hover td{ background: rgba(255,255,255,.03); }
 .watermark{ position: fixed; bottom: 12px; right: 16px; font-size: 11px; color: rgba(230,232,239,.35); letter-spacing: .3px; pointer-events:none; user-select:none; z-index:9999; }
 
 tr.haltRow td { background: rgba(255, 80, 80, .10) !important; }
-tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
-
-/* ===== TradingView Modal ===== */
-.modalBack { position:fixed; inset:0; background: rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:90; }
-.modal { width:min(1100px, 94vw); height:min(720px, 88vh); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; overflow:hidden; box-shadow: 0 18px 70px rgba(0,0,0,.55); }
-.modalTop { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:10px 12px; background:#121622; border-bottom:1px solid rgba(255,255,255,.10); }
-.modalTitle { font-weight:900; font-size:13px; }
-.modalTools { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-.modalClose { cursor:pointer; border:1px solid rgba(255,255,255,.18); background:#121622; color:#e6e8ef; border-radius:10px; padding:8px 10px; }
-.modalClose:hover { border-color: rgba(255,255,255,.28); }
-.chartBox { width:100%; height: calc(100% - 52px); }
 
 /* ===== Risk Notice Popup ===== */
 .riskBack{ position:fixed; inset:0; background: rgba(0,0,0,.72); display:none; align-items:center; justify-content:center; z-index:120; }
@@ -1181,7 +1249,8 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
 .riskFoot{ padding:12px 14px; display:flex; justify-content:flex-end; gap:10px; background:#0b0d12; border-top:1px solid rgba(255,255,255,.08); }
 .riskBtn{ cursor:pointer; border:1px solid rgba(255,255,255,.18); background:#121622; color:#e6e8ef; border-radius:12px; padding:10px 12px; font-size:13px; }
 .riskBtn:disabled{ opacity:.45; cursor:not-allowed; }
-.riskBtn:hover{ border-color: rgba(255,255,255,.28); }
+
+/* Mini chart box will be injected by JS */
 </style>
 </head>
 <body>
@@ -1193,22 +1262,22 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
           <span class="brandMark">${BRAND.mark}</span>
           <span class="brandName">${BRAND.legal}</span>
         </div>
-        <div class="brandSub">${BRAND.subtitle} • TradingView modal • Pre/After Snapshot-All or AM fallback • HALT optional</div>
+        <div class="brandSub">${BRAND.subtitle} • Hover mini-chart (ALGTP overlays) • Click → TradingView</div>
       </div>
       <div class="pill">Snapshot-All: <b>${ENABLE_SNAPSHOT_ALL ? "ON" : "OFF"}</b> • AM WS: <b>${ENABLE_AM_WS ? "ON" : "OFF"}</b></div>
     </div>
 
     <div class="nav">
-      <a href="/ui" class="${preset.path==="/ui" ? "active":""}">Dashboard</a>
-      <a href="/ui/gainers" class="${preset.path==="/ui/gainers" ? "active":""}">Gainers</a>
-      <a href="/ui/losers" class="${preset.path==="/ui/losers" ? "active":""}">Losers</a>
-      <a href="/ui/gappers" class="${preset.path==="/ui/gappers" ? "active":""}">Gappers</a>
-      <a href="/ui/smallcap" class="${preset.path==="/ui/smallcap" ? "active":""}">Small Cap</a>
-      <a href="/ui/midcap" class="${preset.path==="/ui/midcap" ? "active":""}">Mid Cap</a>
-      <a href="/ui/bigcap" class="${preset.path==="/ui/bigcap" ? "active":""}">Big Cap</a>
-      <a href="/ui/premarket" class="${preset.path==="/ui/premarket" ? "active":""}">Pre-Market</a>
-      <a href="/ui/aftermarket" class="${preset.path==="/ui/aftermarket" ? "active":""}">After-Hours</a>
-      <a href="/ui/snapshot-all" class="${preset.path==="/ui/snapshot-all" ? "active":""}">Snapshot-All</a>
+      <a href="/ui" class="${active("/ui")}">Dashboard</a>
+      <a href="/ui/gainers" class="${active("/ui/gainers")}">Gainers</a>
+      <a href="/ui/losers" class="${active("/ui/losers")}">Losers</a>
+      <a href="/ui/gappers" class="${active("/ui/gappers")}">Gappers</a>
+      <a href="/ui/smallcap" class="${active("/ui/smallcap")}">Small Cap</a>
+      <a href="/ui/midcap" class="${active("/ui/midcap")}">Mid Cap</a>
+      <a href="/ui/bigcap" class="${active("/ui/bigcap")}">Big Cap</a>
+      <a href="/ui/premarket" class="${active("/ui/premarket")}">Pre-Market</a>
+      <a href="/ui/aftermarket" class="${active("/ui/aftermarket")}">After-Hours</a>
+      <a href="/ui/snapshot-all" class="${active("/ui/snapshot-all")}">Snapshot-All</a>
     </div>
   </div>
 </header>
@@ -1244,15 +1313,13 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
       </select>
 
       <input id="minGap" placeholder="minGap% (only for Gappers)" style="min-width:200px;" />
-
-      <span class="pill"><input id="openNewWin" type="checkbox" style="transform:translateY(1px)"/> Open new tab</span>
       <button id="runBtn">Run</button>
       <span class="pill" id="statusPill">Idle</span>
     </div>
 
     <div class="hint">
-      Click ticker → TradingView modal (default). Ctrl/Cmd+Click OR “Open new tab” → open TradingView in new tab.
-      <br/>Pre/After: Snapshot-All ON = accurate. Snapshot-All OFF = AM WS fallback + enrich (best effort cap filter).
+      Hover ticker → mini chart + ALGTP overlays (EMA/SMA/VWAP). Click ticker → open TradingView platform.
+      <br/>Pre/After: Snapshot-All ON = accurate. OFF = AM fallback + enrich (best effort cap filter).
     </div>
 
     <div class="err" id="errBox"></div>
@@ -1262,33 +1329,6 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
 <div class="wrap" id="out"></div>
 
 <div class="watermark">${BRAND.watermark}</div>
-
-<!-- TradingView Modal -->
-<div class="modalBack" id="modalBack" aria-hidden="true">
-  <div class="modal" role="dialog" aria-modal="true">
-    <div class="modalTop">
-      <div class="modalTitle" id="modalTitle">${BRAND.mark} ${BRAND.name} Chart</div>
-      <div class="modalTools">
-        <select id="exSel">
-          <option value="NASDAQ">NASDAQ</option>
-          <option value="NYSE">NYSE</option>
-          <option value="AMEX">AMEX</option>
-        </select>
-        <select id="tfSel">
-          <option value="1">1m</option>
-          <option value="5" selected>5m</option>
-          <option value="15">15m</option>
-          <option value="60">1h</option>
-          <option value="240">4h</option>
-          <option value="D">1D</option>
-          <option value="W">1W</option>
-        </select>
-        <button class="modalClose" id="closeBtn">Close</button>
-      </div>
-    </div>
-    <div class="chartBox" id="chartBox"></div>
-  </div>
-</div>
 
 <!-- Risk Notice Popup (always show every load) -->
 <div class="riskBack" id="riskBack" aria-hidden="true">
@@ -1330,14 +1370,15 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
   </div>
 </div>
 
-<script src="https://s3.tradingview.com/tv.js"></script>
+<!-- Lightweight Charts for hover mini-chart -->
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 
 <script>
 const PRESET = ${JSON.stringify({
-    group: presetGroup,
-    cap: presetCap,
-    limit: presetLimit,
-    minGap: presetMinGap,
+    group: preset.group || "topGainers",
+    cap: preset.cap || "all",
+    limit: preset.limit || 80,
+    minGap: preset.minGap ?? "",
   })};
 
 const byId = (id) => document.getElementById(id);
@@ -1372,7 +1413,6 @@ const statusPill = byId("statusPill");
     back.setAttribute("aria-hidden","true");
   });
 
-  // Block ESC dismiss unless agreed
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && back.style.display === "flex") {
       e.preventDefault();
@@ -1401,76 +1441,116 @@ function fmtInt(x){
   return Math.round(nn).toLocaleString();
 }
 
-// ===== TradingView Modal =====
-const modalBack = byId("modalBack");
-const modalTitle = byId("modalTitle");
-const chartBox = byId("chartBox");
-const exSel = byId("exSel");
-const tfSel = byId("tfSel");
-let currentSymbol = null;
-
-function openModal(){
-  modalBack.style.display = "flex";
-  modalBack.setAttribute("aria-hidden", "false");
-}
-function closeModal(){
-  modalBack.style.display = "none";
-  modalBack.setAttribute("aria-hidden", "true");
-  chartBox.innerHTML = "";
-  currentSymbol = null;
-}
-function buildTvSymbol(sym){
-  const ex = exSel.value || "NASDAQ";
-  return ex + ":" + sym;
-}
+// ===== Click ticker => TradingView platform =====
 function tvUrlFor(sym){
-  const tvSymbol = buildTvSymbol(sym);
-  const interval = tfSel.value || "5";
-  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol) + "&interval=" + encodeURIComponent(interval);
-}
-function renderChart(sym){
-  if (!window.TradingView || !window.TradingView.widget){
-    alert("TradingView library failed to load.");
-    return;
-  }
-  chartBox.innerHTML = '<div id="tv_chart" style="width:100%;height:100%;"></div>';
-  const tvSymbol = buildTvSymbol(sym);
-  const interval = tfSel.value || "5";
-
-  new TradingView.widget({
-    autosize: true,
-    symbol: tvSymbol,
-    interval: interval,
-    timezone: "America/New_York",
-    theme: "dark",
-    style: "1",
-    locale: "en",
-    enable_publishing: false,
-    allow_symbol_change: true,
-    container_id: "tv_chart"
-  });
-}
-function openChart(sym){
-  currentSymbol = sym;
-  modalTitle.textContent = "${BRAND.mark} ${BRAND.name} Chart — " + sym;
-  openModal();
-  renderChart(sym);
+  // default exchange NASDAQ; user can change in TV UI
+  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent("NASDAQ:" + sym) + "&interval=5";
 }
 window.handleTickerClick = function(ev, sym){
-  const forceNew = byId("openNewWin")?.checked;
-  const modifier = ev && (ev.ctrlKey || ev.metaKey);
-  if (forceNew || modifier){
-    window.open(tvUrlFor(sym), "_blank", "noopener,noreferrer");
-    return;
-  }
-  openChart(sym);
+  window.open(tvUrlFor(sym), "_blank", "noopener,noreferrer");
 };
 
-byId("closeBtn").addEventListener("click", closeModal);
-modalBack.addEventListener("click", (e)=>{ if (e.target === modalBack) closeModal(); });
-document.addEventListener("keydown", (e)=>{ if (e.key === "Escape") closeModal(); });
-exSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
-tfSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
+// ===== Hover mini-chart (ALGTP overlays) =====
+let miniBox = null, miniChart = null, candle = null;
+let lineEMA9=null, lineEMA34=null, lineSMA26=null, lineVWAP=null;
+let miniSym = null;
+let hoverTimer = null;
+const miniCache = new Map(); // sym -> payload
+
+function ensureMiniBox(){
+  if (miniBox) return;
+  miniBox = document.createElement("div");
+  miniBox.style.position = "fixed";
+  miniBox.style.width = "380px";
+  miniBox.style.height = "250px";
+  miniBox.style.background = "#0b0d12";
+  miniBox.style.border = "1px solid rgba(255,255,255,.18)";
+  miniBox.style.borderRadius = "16px";
+  miniBox.style.boxShadow = "0 18px 70px rgba(0,0,0,.55)";
+  miniBox.style.padding = "10px";
+  miniBox.style.zIndex = "110";
+  miniBox.style.display = "none";
+  miniBox.innerHTML = \`
+    <div id="miniTitle" style="font-weight:900;font-size:12px;margin-bottom:6px;"></div>
+    <div id="miniChart" style="width:100%;height:190px;"></div>
+    <div style="margin-top:6px;font-size:11px;color:#a7adc2">Hover = mini chart • Click = TradingView</div>
+  \`;
+  document.body.appendChild(miniBox);
+
+  const el = miniBox.querySelector("#miniChart");
+  miniChart = LightweightCharts.createChart(el, {
+    layout: { background: { type: "solid", color: "#0b0d12" }, textColor: "#c8cde0" },
+    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+    rightPriceScale: { visible: true },
+    timeScale: { visible: false },
+    crosshair: { mode: 0 },
+  });
+
+  candle = miniChart.addCandlestickSeries();
+  lineEMA9  = miniChart.addLineSeries();
+  lineEMA34 = miniChart.addLineSeries();
+  lineSMA26 = miniChart.addLineSeries();
+  lineVWAP  = miniChart.addLineSeries();
+}
+
+function posMini(ev){
+  const pad = 12;
+  let x = ev.clientX + pad;
+  let y = ev.clientY + pad;
+  const w = 400, h = 270;
+  if (x + w > window.innerWidth) x = ev.clientX - w - pad;
+  if (y + h > window.innerHeight) y = ev.clientY - h - pad;
+  miniBox.style.left = x + "px";
+  miniBox.style.top = y + "px";
+}
+
+async function fetchMini(sym){
+  if (miniCache.has(sym)) return miniCache.get(sym);
+  const r = await fetch("/mini-chart?symbol=" + encodeURIComponent(sym) + "&tf=1");
+  const j = await r.json();
+  if (!j.ok) return null;
+  miniCache.set(sym, j);
+  return j;
+}
+
+async function showMini(ev, sym){
+  ensureMiniBox();
+  miniSym = sym;
+  posMini(ev);
+  miniBox.style.display = "block";
+  miniBox.querySelector("#miniTitle").textContent = "📈 " + sym + " — ALGTP overlays (EMA/SMA/VWAP)";
+
+  const data = await fetchMini(sym);
+  if (!data || miniSym !== sym) return;
+
+  candle.setData(data.ohlc || []);
+  lineEMA9.setData((data.overlays && data.overlays.ema9) || []);
+  lineEMA34.setData((data.overlays && data.overlays.ema34) || []);
+  lineSMA26.setData((data.overlays && data.overlays.sma26) || []);
+  lineVWAP.setData((data.overlays && data.overlays.vwap) || []);
+}
+
+function hideMini(){
+  miniSym = null;
+  if (miniBox) miniBox.style.display = "none";
+}
+
+function bindMiniHover(){
+  document.querySelectorAll(".symLink").forEach(a=>{
+    const sym = a.getAttribute("data-sym") || a.textContent.trim();
+    a.addEventListener("mouseenter", (ev)=>{
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(()=> showMini(ev, sym), 120); // slight delay prevents spam
+    });
+    a.addEventListener("mousemove", (ev)=>{
+      if (miniBox && miniBox.style.display === "block") posMini(ev);
+    });
+    a.addEventListener("mouseleave", ()=>{
+      clearTimeout(hoverTimer);
+      hideMini();
+    });
+  });
+}
 
 // ===== Render table =====
 function renderList(data){
@@ -1512,7 +1592,9 @@ function renderList(data){
               <tr class="\${rowClass}">
                 <td>\${halt}\${r.signalIcon||""}</td>
                 <td>\${r.paIcon||""}</td>
-                <td class="mono"><a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'\${safe}')">\${sym}</a></td>
+                <td class="mono">
+                  <a class="symLink" data-sym="\${safe}" href="javascript:void(0)" onclick="handleTickerClick(event,'\${safe}')">\${sym}</a>
+                </td>
                 <td class="right mono">\${fmtNum(r.price)}</td>
                 <td class="right mono">\${fmtNum(r.pricePct)}%</td>
                 <td class="right mono">\${fmtNum(r.extPct)}%</td>
@@ -1529,6 +1611,9 @@ function renderList(data){
       </table>
     </div>
   </div>\`;
+
+  // IMPORTANT: bind hover after DOM is created
+  bindMiniHover();
 }
 
 async function run(){
@@ -1587,7 +1672,7 @@ run();
 </html>`;
 }
 
-// UI routes
+// UI routes (presets)
 app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 80 })));
 app.get("/ui/gainers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 80 })));
 app.get("/ui/losers", (req, res) => res.type("html").send(renderUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 80 })));
@@ -1600,7 +1685,7 @@ app.get("/ui/aftermarket", (req, res) => res.type("html").send(renderUI({ path: 
 app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path: "/ui/snapshot-all", group: "snapshotAll", cap: "all", limit: 200 })));
 
 // ============================================================================
-// SECTION 13 — Start WS + Listen
+// SECTION 14 — Start WS + Listen
 // ============================================================================
 startHaltWebSocket();
 startAMWebSocket();
@@ -1611,6 +1696,7 @@ app.listen(PORT, () => {
   console.log(`🚀 UI: ${base}/ui`);
   console.log(`🌅 Pre: ${base}/ui/premarket`);
   console.log(`🌙 After: ${base}/ui/aftermarket`);
+  console.log(`📈 Mini chart: ${base}/mini-chart?symbol=AAPL&tf=1`);
   console.log(`⛔ Halts: ${base}/halts`);
   console.log(`ℹ️ API: ${base}/api`);
   if (!ENABLE_SNAPSHOT_ALL) console.log(`⚠️ Snapshot-All OFF → Pre/After uses AM WS fallback + enrich`);

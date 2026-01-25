@@ -11,14 +11,15 @@
 // - HALT WS (optional): LULD.*
 // ============================================================================
 
-require("dotenv").config();
-const express = require("express");
-const axios = require("axios");
+import 'dotenv/config';
+import express from 'express';
+import axios from 'axios';
 
 // ws optional
 let WebSocketLib = null;
 try {
-  WebSocketLib = require("ws");
+  const { default: WebSocket } = await import('ws');
+  WebSocketLib = WebSocket;
 } catch {
   WebSocketLib = null;
 }
@@ -1355,7 +1356,7 @@ app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path:
 startHaltWebSocket();
 startAMWebSocket();
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   const base = `http://localhost:${PORT}`;
   console.log(`\n✅ ${BRAND.legal} running`);
   console.log(`🚀 UI: ${base}/ui`);

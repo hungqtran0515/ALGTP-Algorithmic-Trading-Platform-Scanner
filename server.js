@@ -68,8 +68,11 @@ const BRAND = {
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const app = express();
-app.use(express.json());
+
+import "dotenv/config";
+import express from "express";
+import axios from "axios";
+
 
 // ============================================================================
 // SECTION 02 — ENV Config + Runtime Modes

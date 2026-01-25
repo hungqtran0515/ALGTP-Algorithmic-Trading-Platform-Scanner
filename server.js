@@ -1251,7 +1251,55 @@ function renderTable(data){
       </div>
     </div>\`;
 }
+// -------------------- AUTO REFRESH (30s default) --------------------
+let autoTimer = null;
+let countdownTimer = null;
+let countdown = 0;
 
+function stopAuto(){
+  if(autoTimer) clearInterval(autoTimer);
+  if(countdownTimer) clearInterval(countdownTimer);
+  autoTimer = null;
+  countdownTimer = null;
+  countdown = 0;
+
+  const badge = byId("countdownBadge");
+  if (badge) badge.textContent = "-";
+
+  const on = byId("autoOn");
+  if (on) on.checked = false;
+}
+
+function startAuto(seconds){
+  stopAuto();
+
+  const sec = Math.max(5, Math.min(3600, Number(seconds) || 30));
+  const on = byId("autoOn");
+  if (on) on.checked = true;
+
+  countdown = sec;
+  const badge = byId("countdownBadge");
+  if (badge) badge.textContent = "Next refresh in " + countdown + "s";
+
+  countdownTimer = setInterval(()=>{
+    countdown -= 1;
+    if(countdown <= 0) countdown = sec;
+    if (badge) badge.textContent = "Next refresh in " + countdown + "s";
+  }, 1000);
+
+  autoTimer = setInterval(()=>{ run(); }, sec * 1000);
+}
+
+function applyAuto(){
+  const on = byId("autoOn");
+  if (!on) return;
+
+  if (!on.checked) { stopAuto(); return; }
+
+  const secInput = byId("autoSec");
+  const sec = secInput ? secInput.value : "30";
+  startAuto(sec);
+}
 async function run(){
   clearError();
   out.innerHTML="";

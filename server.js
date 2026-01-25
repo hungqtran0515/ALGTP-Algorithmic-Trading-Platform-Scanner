@@ -1,6 +1,6 @@
 // ============================================================================
 // 🔥 ALGTP™ — Massive Scanner (REST + WS HALT + WS AM fallback)
-// Single-file Node.js (CommonJS)
+// Single-file Node.js (ES Module)
 // ----------------------------------------------------------------------------
 // UI:
 //  - /ui (+ tabs)
@@ -20,13 +20,13 @@
 //  - Must check "I Understand & Agree" to continue (cannot dismiss otherwise)
 // ============================================================================
 
-require("dotenv").config();
-const express = require("express");
-const axios = require("axios");
+import 'dotenv/config';
+import express from 'express';
+import axios from 'axios';
 
 let WebSocketLib = null;
 try {
-  WebSocketLib = require("ws");
+  WebSocketLib = (await import('ws')).default;
 } catch {
   WebSocketLib = null;
 }

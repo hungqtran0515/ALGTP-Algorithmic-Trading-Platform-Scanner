@@ -2034,7 +2034,88 @@ discCloseBtn.addEventListener("click", ()=>closeDisclaimer(false));
 discBack.addEventListener("click", (e)=>{ if (e.target === discBack) closeDisclaimer(false); });
 
 showDisclaimer();
-</script>
+</script> // -------- Chart Modal / New Window --------
+const modalBack = byId("modalBack");
+const modalTitle = byId("modalTitle");
+const chartBox = byId("chartBox");
+const exSel = byId("exSel");
+const tfSel = byId("tfSel");
+let currentSymbol = null;
+
+function openModal(){
+  modalBack.style.display = "flex";
+  modalBack.setAttribute("aria-hidden", "false");
+}
+function closeModal(){
+  modalBack.style.display = "none";
+  modalBack.setAttribute("aria-hidden", "true");
+  chartBox.innerHTML = "";
+  currentSymbol = null;
+}
+
+function buildTvSymbol(sym){
+  const ex = exSel.value || "NASDAQ";
+  return ex + ":" + sym;
+}
+
+function tvUrlFor(sym){
+  const tvSymbol = buildTvSymbol(sym);
+  const interval = tfSel.value || "5";
+  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol) +
+         "&interval=" + encodeURIComponent(interval);
+}
+
+function renderChart(sym){
+  if (!window.TradingView || !window.TradingView.widget){
+    alert("TradingView library failed to load.");
+    return;
+  }
+  chartBox.innerHTML = '<div id="tv_chart" style="width:100%;height:100%;"></div>';
+  const tvSymbol = buildTvSymbol(sym);
+  const interval = tfSel.value || "5";
+
+  new TradingView.widget({
+    autosize: true,
+    symbol: tvSymbol,
+    interval: interval,
+    timezone: "America/New_York",
+    theme: "dark",
+    style: "1",
+    locale: "en",
+    enable_publishing: false,
+    allow_symbol_change: true,
+    container_id: "tv_chart"
+  });
+}
+
+function openChart(sym){
+  currentSymbol = sym;
+  modalTitle.textContent = "ALGTP™ Chart — " + sym;
+  openModal();
+  renderChart(sym);
+}
+
+// Click handler: normal click = modal, Ctrl/Cmd = new tab (optional checkbox)
+window.handleTickerClick = function(ev, sym){
+  const forceNew = byId("openNewWin")?.checked; // nếu bạn có checkbox này
+  const modifier = ev && (ev.ctrlKey || ev.metaKey);
+  if (forceNew || modifier){
+    const url = tvUrlFor(sym);
+    const newTab = byId("openNewTab")?.checked !== false; // nếu có checkbox new tab
+    if (newTab) window.open(url, "_blank", "noopener,noreferrer");
+    else window.location.href = url;
+    return;
+  }
+  openChart(sym);
+};
+
+byId("closeBtn").addEventListener("click", closeModal);
+modalBack.addEventListener("click", (e)=>{ if (e.target === modalBack) closeModal(); });
+document.addEventListener("keydown", (e)=>{ if (e.key === "Escape") closeModal(); });
+
+exSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
+tfSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
+
 </body>
 </html>`;
 }
@@ -2302,6 +2383,603 @@ app.get("/help", (req, res) => {
 // Key kỹ thuật: graceful ws disable if missing
 // Debug tag: SECTION20_LISTEN_STARTUP
 // ============================================================================
+/**
+ * top-movers.js (Standalone)
+ * --------------------------------------------
+ * ALGTP™ Top Movers Engine (Movers -> Snapshot -> Normalize -> Score)
+ *
+ * Run:
+ *   npm i express axios dotenv
+ *   node top-movers.js
+ *
+ * .env (minimum):
+ *   PORT=3000
+ *   MASSIVE_API_KEY=...
+ *   MASSIVE_AUTH_TYPE=query|xapi|bearer
+ *   MASSIVE_QUERY_KEYNAME=apiKey
+ *   MASSIVE_MOVER_URL=https://api.massive.com/v2/snapshot/locale/us/markets/stocks
+ *   MASSIVE_TICKER_SNAPSHOT_URL=https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers
+ *
+ * Optional (Indicators 5m):
+ *   ENABLE_5M_INDICATORS=true|false
+ *   MASSIVE_AGGS_URL=https://api.massive.com/v2/aggs/ticker
+ *   AGGS_5M_LIMIT=80
+ *   VOL_SPIKE_MULT=1.5
+ *   VOL_AVG_LEN_5M=20
+ */
+
+require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
+
+const app = express();
+app.use(express.json());
+
+// ---------------- ENV ----------------
+const PORT = Number(process.env.PORT || 3000);
+
+const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
+const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
+const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
+
+const MASSIVE_MOVER_URL = String(
+  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
+).trim();
+
+const MASSIVE_TICKER_SNAPSHOT_URL = String(
+  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
+).trim();
+
+// ✅ IMPORTANT: declare before envMissing
+const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
+
+const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
+const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
+const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
+
+// Indicators toggles
+const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "false").toLowerCase() === "true";
+const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
+const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
+const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
+
+// ---------------- helpers ----------------
+function envMissing() {
+  const miss = [];
+  if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
+  if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
+  if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
+  // ✅ only require aggs if indicators enabled
+  if (ENABLE_5M_INDICATORS && !MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
+  return miss;
+}
+
+function auth(params = {}, headers = {}) {
+  const t = String(MASSIVE_AUTH_TYPE).toLowerCase();
+
+  if (t === "query") params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
+  else if (t === "xapi") headers["x-api-key"] = MASSIVE_API_KEY;
+  else if (t === "bearer") headers["authorization"] = `Bearer ${MASSIVE_API_KEY}`;
+  else params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
+
+  headers["user-agent"] =
+    headers["user-agent"] ||
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+
+  return { params, headers };
+}
+
+function n(x) {
+  const v = Number(x);
+  return Number.isFinite(v) ? v : null;
+}
+function round2(x) {
+  const v = n(x);
+  return v === null ? null : Number(v.toFixed(2));
+}
+function clamp(x, a, b) {
+  return Math.max(a, Math.min(b, x));
+}
+
+async function mapPool(items, concurrency, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+
+  async function worker() {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+
+  const workers = Array.from({ length: concurrency }, () => worker());
+  await Promise.all(workers);
+  return out;
+}
+
+// ---------------- scoring (icon + alerts) ----------------
+function demandScore(row) {
+  const gap = Math.abs(n(row?.gapPct) ?? 0);
+  const pc = Math.abs(n(row?.pricePct) ?? 0);
+
+  let s = 0;
+  if (gap >= 20) s += 1;
+  if (gap >= 40) s += 1;
+  if (gap >= 60) s += 1;
+  if (pc >= 10) s += 1;
+  if (pc >= 20) s += 1;
+
+  // optional extra boost if both signals exist
+  if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
+
+  return clamp(s, 0, 5);
+}
+function signalIcon(d) {
+  if (d >= 5) return "🚀";
+  if (d >= 4) return "🔥";
+  if (d >= 3) return "👀";
+  return "⛔️";
+}
+function paSignalIcon(row) {
+  const above = Boolean(row?.aboveVWAP_5m);
+  const volSpike = Boolean(row?.volSpike_5m);
+  if (above && volSpike) return "🚨";
+  if (above) return "✅";
+  if (volSpike) return "🔊";
+  return "";
+}
+
+// ---------------- axios safe ----------------
+function axiosFail(e) {
+  if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
+
+  const code = e.code || null;
+  const msg = e.message || "axios error";
+  const url = e.config?.url || null;
+
+  if (!e.response) return { kind: "network", code, message: msg, url };
+
+  const status = e.response.status;
+  const data = e.response.data;
+  const bodyPreview = typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data).slice(0, 800);
+  return { kind: "http", status, message: msg, url, bodyPreview };
+}
+
+async function safeGet(url, { params, headers }) {
+  try {
+    const r = await axios.get(url, {
+      params,
+      headers,
+      timeout: 25000,
+      validateStatus: () => true,
+    });
+    return { ok: r.status < 400, status: r.status, data: r.data, url };
+  } catch (e) {
+    return { ok: false, status: null, data: null, url, errorDetail: axiosFail(e) };
+  }
+}
+
+// ---------------- Massive calls ----------------
+async function fetchMovers(direction = "gainers") {
+  const d = String(direction || "gainers").toLowerCase().trim();
+  const directionSafe = d === "losers" ? "losers" : "gainers";
+
+  const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
+  const url = `${base}/${directionSafe}`;
+
+  const params = {};
+  const headers = {};
+  if (INCLUDE_OTC) params["include_otc"] = "true";
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+
+  const rows = Array.isArray(r.data?.tickers)
+    ? r.data.tickers
+    : Array.isArray(r.data?.results)
+    ? r.data.results
+    : Array.isArray(r.data?.data)
+    ? r.data.data
+    : null;
+
+  return {
+    ok: r.ok && Array.isArray(rows),
+    url,
+    status: r.status,
+    rows: Array.isArray(rows) ? rows : [],
+    sample: Array.isArray(rows) ? rows[0] : r.data,
+    errorDetail: r.errorDetail,
+  };
+}
+
+async function fetchTickerSnapshot(ticker) {
+  const base = MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "");
+  const url = `${base}/${encodeURIComponent(String(ticker || "").trim().toUpperCase())}`;
+
+  const params = {};
+  const headers = {};
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+  return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
+}
+
+// ---------------- auto-detect fields ----------------
+function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
+  if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
+
+  const wanted = new Set(candidateKeys.map((k) => String(k).toLowerCase()));
+  const q = [{ v: obj, path: "root" }];
+  let visited = 0;
+
+  while (q.length && visited < maxNodes) {
+    const { v, path } = q.shift();
+    visited++;
+
+    if (!v || typeof v !== "object") continue;
+
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        const item = v[i];
+        if (item && typeof item === "object") q.push({ v: item, path: `${path}[${i}]` });
+      }
+      continue;
+    }
+
+    for (const k of Object.keys(v)) {
+      const keyLower = String(k).toLowerCase();
+      const val = v[k];
+
+      if (wanted.has(keyLower)) {
+        const num = n(val);
+        if (num !== null) return { value: num, path: `${path}.${k}`, keyMatched: k };
+      }
+
+      if (val && typeof val === "object") q.push({ v: val, path: `${path}.${k}` });
+    }
+  }
+
+  return { value: null, path: null, keyMatched: null };
+}
+
+function capCategory(marketCap) {
+  const mc = n(marketCap);
+  if (mc === null) return null;
+  if (mc < 2_000_000_000) return "small";
+  if (mc < 10_000_000_000) return "mid";
+  return "big";
+}
+
+function floatCategory(floatShares) {
+  const fs = n(floatShares);
+  if (fs === null) return null;
+  if (fs < 10_000_000) return "nano";
+  if (fs < 20_000_000) return "low";
+  if (fs < 50_000_000) return "mid";
+  return "high";
+}
+
+function normalizeSnapshotAuto(ticker, snap) {
+  const root = snap?.results ?? snap ?? {};
+  const day = root?.day ?? root?.todays ?? root?.today ?? null;
+  const prev = root?.prevDay ?? root?.previousDay ?? root?.prev ?? null;
+
+  const lastTradePrice =
+    n(root?.lastTrade?.p) ??
+    n(root?.lastTrade?.price) ??
+    n(root?.last?.p) ??
+    n(root?.last) ??
+    n(root?.price) ??
+    null;
+
+  const dayClose = n(day?.c ?? day?.close ?? root?.close ?? root?.dayClose) ?? null;
+  const prevClose = n(prev?.c ?? prev?.close ?? root?.prevClose ?? root?.previousClose) ?? null;
+
+  let price = lastTradePrice ?? dayClose ?? null;
+  let open = n(day?.o ?? day?.open ?? root?.open) ?? null;
+  let volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
+
+  let pricePct =
+    n(root?.todaysChangePerc) ??
+    n(root?.todaysChangePercent) ??
+    n(root?.changePerc) ??
+    n(root?.changePercent) ??
+    null;
+
+  if (price === null) {
+    const fp = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]);
+    price = fp.value;
+  }
+  if (open === null) {
+    const fo = findFirstNumberByKeys(root, ["open", "o"]);
+    open = fo.value;
+  }
+
+  let prevC = prevClose;
+  if (prevC === null) {
+    const fpc = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]);
+    prevC = fpc.value;
+  }
+
+  if (volume === null) {
+    const fv = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]);
+    volume = fv.value;
+  }
+
+  if (pricePct === null && price !== null && prevC !== null && prevC > 0) {
+    pricePct = ((price - prevC) / prevC) * 100;
+  }
+
+  const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
+
+  // Float
+  let floatShares =
+    n(root?.float) ??
+    n(root?.freeFloat) ??
+    n(root?.sharesFloat) ??
+    n(root?.floatShares) ??
+    null;
+
+  if (floatShares === null) {
+    const ff = findFirstNumberByKeys(root, [
+      "float",
+      "freefloat",
+      "free_float",
+      "sharesfloat",
+      "floatshares",
+      "publicfloat",
+      "public_float",
+    ]);
+    floatShares = ff.value;
+  }
+
+  // Market cap
+  let marketCap =
+    n(root?.marketCap) ??
+    n(root?.marketcap) ??
+    n(root?.mktcap) ??
+    n(root?.market_cap) ??
+    n(root?.marketCapitalization) ??
+    null;
+
+  if (marketCap === null) {
+    const mc = findFirstNumberByKeys(root, ["marketcap", "mktcap", "market_cap", "marketcapitalization", "cap", "capitalization"]);
+    marketCap = mc.value;
+  }
+
+  return {
+    symbol: String(ticker || "").trim().toUpperCase(),
+    price: price !== null ? round2(price) : null,
+    pricePct: pricePct !== null ? round2(pricePct) : null,
+    gapPct: gapPct !== null ? round2(gapPct) : null,
+    volume: volume !== null ? Math.round(volume) : null,
+
+    floatShares: floatShares !== null ? Math.round(floatShares) : null,
+    floatM: floatShares !== null ? round2(floatShares / 1_000_000) : null,
+    floatCat: floatCategory(floatShares),
+
+    marketCap: marketCap !== null ? Math.round(marketCap) : null,
+    marketCapB: marketCap !== null ? round2(marketCap / 1_000_000_000) : null,
+    cap: capCategory(marketCap),
+  };
+}
+
+// ---------------- 5m indicators (optional) ----------------
+function computeSMA(closes, len) {
+  if (!Array.isArray(closes) || closes.length < len) return null;
+  let sum = 0;
+  for (let i = closes.length - len; i < closes.length; i++) sum += closes[i];
+  return sum / len;
+}
+function computeEMA(closes, len) {
+  if (!Array.isArray(closes) || closes.length < len) return null;
+  const k = 2 / (len + 1);
+  // seed
+  let ema = 0;
+  for (let i = 0; i < len; i++) ema += closes[i];
+  ema /= len;
+  for (let i = len; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
+  return ema;
+}
+function computeVWAP(closes, volumes) {
+  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length) return null;
+  let pv = 0, vv = 0;
+  for (let i = 0; i < closes.length; i++) {
+    const c = n(closes[i]);
+    const v = n(volumes[i]);
+    if (c === null || v === null || v <= 0) continue;
+    pv += c * v; vv += v;
+  }
+  if (vv <= 0) return null;
+  return pv / vv;
+}
+function computeAvg(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  let s = 0, c = 0;
+  for (const x of arr) {
+    const v = n(x);
+    if (v === null) continue;
+    s += v; c++;
+  }
+  if (c === 0) return null;
+  return s / c;
+}
+
+function indicatorsFromAggs5m(barsDesc) {
+  if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
+    return { sma26_5m:null, ema9_5m:null, ema34_5m:null, vwap_5m:null, lastVol_5m:null, avgVol_5m:null };
+  }
+
+  const bars = barsDesc
+    .map((b) => ({ c: n(b?.c ?? b?.close), v: n(b?.v ?? b?.volume) }))
+    .filter((x) => x.c !== null)
+    .slice(0, 600);
+
+  const barsChrono = [...bars].reverse();
+  const closes = barsChrono.map((x) => x.c);
+  const vols = barsChrono.map((x) => x.v ?? 0);
+
+  const sma26 = closes.length >= 26 ? computeSMA(closes, 26) : null;
+  const ema9 = computeEMA(closes, 9);
+  const ema34 = computeEMA(closes, 34);
+  const vwap = computeVWAP(closes, vols);
+
+  const lastBar = barsChrono[barsChrono.length - 1] || null;
+  const lastVol = lastBar?.v ?? null;
+  const avgVol = computeAvg(vols.slice(-VOL_AVG_LEN_5M));
+
+  return {
+    sma26_5m: sma26 !== null ? round2(sma26) : null,
+    ema9_5m: ema9 !== null ? round2(ema9) : null,
+    ema34_5m: ema34 !== null ? round2(ema34) : null,
+    vwap_5m: vwap !== null ? round2(vwap) : null,
+    lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
+    avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
+  };
+}
+
+const aggsCache = new Map(); // SYM|5m -> {ts,bars}
+async function fetchAggs5m(ticker) {
+  const sym = String(ticker || "").trim().toUpperCase();
+  const cacheKey = `${sym}|5m`;
+  const now = Date.now();
+  const hit = aggsCache.get(cacheKey);
+  if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
+
+  const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
+  const to = ymd(new Date());
+  const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
+  const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
+
+  const params = { adjusted:"true", sort:"desc", limit:String(AGGS_5M_LIMIT) };
+  const headers = {};
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+  const bars = Array.isArray(r.data?.results) ? r.data.results : [];
+  const ok = r.ok && bars.length > 0;
+
+  if (ok) aggsCache.set(cacheKey, { ts: now, bars });
+  return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
+}
+
+function attach5mSignals(row) {
+  const price = n(row?.price);
+  const vwap = n(row?.vwap_5m);
+  const lastVol = n(row?.lastVol_5m);
+  const avgVol = n(row?.avgVol_5m);
+
+  const aboveVWAP = price !== null && vwap !== null ? price > vwap : false;
+  const volSpike = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol >= avgVol * VOL_SPIKE_MULT : false;
+
+  const rvol = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol / avgVol : null;
+
+  return {
+    ...row,
+    aboveVWAP_5m: aboveVWAP,
+    volSpike_5m: volSpike,
+    rvol_5m: rvol !== null ? round2(rvol) : null,
+    paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }),
+  };
+}
+
+// ---------------- Top Movers endpoint ----------------
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    message: "ALGTP™ Standalone Top Movers Engine ✅",
+    endpoint: "/top-movers?direction=gainers|losers&limit=50&sort=price|gap&minGap=10&cap=all|small|mid|big",
+    indicators: { ENABLE_5M_INDICATORS },
+  });
+});
+
+app.get("/top-movers", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+
+    const direction = String(req.query.direction || "gainers").toLowerCase() === "losers" ? "losers" : "gainers";
+    const limit = clamp(Number(req.query.limit || 50), 5, 200);
+    const cap = String(req.query.cap || "all").toLowerCase();
+    const sort = String(req.query.sort || "price").toLowerCase(); // price|gap
+    const minGap = n(req.query.minGap);
+
+    // 1) movers
+    const movers = await fetchMovers(direction);
+    if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
+
+    // 2) tickers
+    const tickers = movers.rows
+      .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, limit);
+
+    // 3) snapshots
+    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+      const r = await fetchTickerSnapshot(t);
+      return { ticker: t, ...r };
+    });
+
+    const good = snaps.filter((x) => x.ok);
+    const bad = snaps.filter((x) => !x.ok);
+
+    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+
+    // cap filter
+    if (cap !== "all") rows = rows.filter((r) => r.cap === cap);
+
+    // gappers filter if requested
+    if (minGap !== null && Number.isFinite(minGap)) rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
+
+    // 4) optional indicators
+    const aggsErrors = [];
+    if (ENABLE_5M_INDICATORS) {
+      const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
+        const a = await fetchAggs5m(r.symbol);
+        if (!a.ok) {
+          aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
+          return { symbol: r.symbol, sma26_5m:null, ema9_5m:null, ema34_5m:null, vwap_5m:null, lastVol_5m:null, avgVol_5m:null };
+        }
+        return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
+      });
+      const mapInd = new Map(ind.map((x) => [x.symbol, x]));
+      rows = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
+      rows = rows.map((r) => attach5mSignals(r));
+    } else {
+      rows = rows.map((r) => ({ ...r, paIcon: "" }));
+    }
+
+    // 5) scoring + icons
+    rows = rows.map((r) => {
+      const d = demandScore(r);
+      return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
+    });
+
+    // 6) sort
+    if (sort === "gap") rows.sort((a,b)=> Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
+    else rows.sort((a,b)=> Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+
+    return res.json({
+      ok: true,
+      direction,
+      cap,
+      limit,
+      sort,
+      results: rows,
+      snapshotErrors: DEBUG ? bad.slice(0,10).map(x=>({ ticker:x.ticker, status:x.status, url:x.url, errorDetail:x.errorDetail })) : undefined,
+      aggsErrors: DEBUG ? aggsErrors.slice(0,10) : undefined,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "Top movers failed", detail: String(e?.message || e) });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ ALGTP™ Top Movers running http://localhost:${PORT}`);
+  console.log(`🔎 Try: http://localhost:${PORT}/top-movers?direction=gainers&limit=50`);
+});
+
 startHaltWebSocket();
 
 app.listen(PORT, () => {

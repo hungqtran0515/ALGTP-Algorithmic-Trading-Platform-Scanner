@@ -1287,7 +1287,35 @@ function renderUI(preset = {}) {
     @keyframes fadeOut { to { opacity: 0; transform: translateY(2px); } }
   </style>
 </head>
-<body>
+<body><!-- Chart Modal -->
+<div class="modalBack" id="modalBack" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modalTop">
+      <div class="modalTitle" id="modalTitle">ALGTP™ Chart</div>
+      <div class="modalTools">
+        <select id="exSel">
+          <option value="NASDAQ">NASDAQ</option>
+          <option value="NYSE">NYSE</option>
+          <option value="AMEX">AMEX</option>
+        </select>
+        <select id="tfSel">
+          <option value="1">1m</option>
+          <option value="5" selected>5m</option>
+          <option value="15">15m</option>
+          <option value="60">1h</option>
+          <option value="240">4h</option>
+          <option value="D">1D</option>
+          <option value="W">1W</option>
+        </select>
+        <button class="modalClose" id="closeBtn">Close</button>
+      </div>
+    </div>
+    <div class="chartBox" id="chartBox"></div>
+  </div>
+</div>
+
+<script src="https://s3.tradingview.com/tv.js"></script>
+
 <header>
   <div class="wrap">
     <div class="brandRow">

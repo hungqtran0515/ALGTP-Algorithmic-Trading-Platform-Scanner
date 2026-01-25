@@ -729,47 +729,78 @@ function applySmartFilters(rows, q) {
 // Key kỹ thuật: daytrade stays light; pro can be heavier
 // Debug tag: SECTION15_GROUP_BUILDERS
 // ============================================================================
+// ============================================================================
+// SECTION 15 — Group Builders (Independent pipelines)
+// Debug tag: SECTION15_GROUP_BUILDERS
+// ============================================================================
+
 function capPass(row, cap) {
-  const c = String(cap || "all").toLowerCase();
+  const c = String(cap || "all").toLowerCase().trim();
   if (c === "all") return true;
-  if (!row.cap) return false;
-  return row.cap === c;
+  const rc = String(row?.cap || "").toLowerCase().trim();
+  if (!rc) return false;
+  return rc === c;
 }
+
 async function attachIndicatorsIfEnabled(rows, mode, errorsOut) {
   if (!shouldEnableIndicators(mode)) return rows;
+
+  // If aggs URL missing, don't crash the whole scan; return rows unchanged with error info.
+  if (!process.env.MASSIVE_AGGS_URL) {
+    errorsOut.push({ kind: "missing_env", miss: ["MASSIVE_AGGS_URL"] });
+    return rows;
+  }
+
   const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
-    const a = await fetchAggs5m(r.symbol);
+    const sym = String(r?.symbol || "").trim().toUpperCase();
+    if (!sym) return { symbol: "", sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
+
+    const a = await fetchAggs5m(sym);
     if (!a.ok) {
-      errorsOut.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
-      return { symbol: r.symbol, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
+      errorsOut.push({ ticker: sym, status: a.status, url: a.url, errorDetail: a.errorDetail });
+      return { symbol: sym, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
     }
-    return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
+    return { symbol: sym, ...indicatorsFromAggs5m(a.bars) };
   });
-  const mapInd = new Map(ind.map((x) => [x.symbol, x]));
+
+  const mapInd = new Map(ind.filter(Boolean).map((x) => [x.symbol, x]));
   let out = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
   out = out.map((r) => attach5mSignals(r));
   return out;
 }
+
 function finalizeRows(rows, mode) {
   let out = rows.map(attachVolFloat);
+
   out = out.map((r) => {
     const d = demandScore(r);
-    return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || paSignalIcon(r) };
+    return {
+      ...r,
+      demandScore: d,
+      signalIcon: signalIcon(d),
+      paIcon: r.paIcon || paSignalIcon(r),
+    };
   });
+
   if (mode === "pro") out = out.map(attachHaltFlag);
   return out;
 }
+
 function sortRowsByGroup(rows, group) {
-  if (group === "gappers") rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
+  const g = String(group || "").toLowerCase();
+  if (g === "gappers") rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
   else rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
 }
 
 async function buildRowsFromMovers({ group, cap, limit, mode, query }) {
   const lim = clamp(Number(limit || 50), 5, 200);
-  const dir = group === "losers" ? "losers" : "gainers";
+  const g = String(group || "gainers").toLowerCase();
+  const dir = g === "losers" ? "losers" : "gainers";
 
   const movers = await fetchMovers(dir);
-  if (!movers.ok) return { ok: false, status: 500, body: { ok: false, error: "Movers failed", moverDebug: movers } };
+  if (!movers.ok) {
+    return { ok: false, status: 500, body: { ok: false, error: "Movers failed", moverDebug: movers } };
+  }
 
   const tickers = movers.rows
     .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
@@ -785,9 +816,10 @@ async function buildRowsFromMovers({ group, cap, limit, mode, query }) {
 
   const aggsErrors = [];
   rows = await attachIndicatorsIfEnabled(rows, mode, aggsErrors);
+
   rows = applySmartFilters(rows, query || {});
   rows = finalizeRows(rows, mode);
-  sortRowsByGroup(rows, group);
+  sortRowsByGroup(rows, g);
 
   return {
     ok: true,
@@ -795,8 +827,8 @@ async function buildRowsFromMovers({ group, cap, limit, mode, query }) {
     body: {
       ok: true,
       mode,
-      group,
-      cap,
+      group: g,
+      cap: String(cap || "all").toLowerCase(),
       results: rows,
       snapshotErrors: DEBUG ? bad.slice(0, 12) : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 12) : undefined,
@@ -809,16 +841,20 @@ async function buildRowsFromSnapshotAll({ cap, limit, session, mode, query }) {
     return {
       ok: false,
       status: 403,
-      body: { ok: false, error: "Snapshot-All is disabled", hint: "Set ENABLE_SNAPSHOT_ALL=true to enable Snapshot-All / Pre / After." },
+      body: {
+        ok: false,
+        error: "Snapshot-All is disabled",
+        hint: "Set ENABLE_SNAPSHOT_ALL=true to enable Snapshot-All / Pre / After.",
+      },
     };
   }
+
   const miss = envMissingFor({ needAggs: shouldEnableIndicators(mode), needSnapshotAll: true });
   if (miss.length) return { ok: false, status: 400, body: { ok: false, error: "Missing env", miss } };
 
   const snap = await fetchSnapshotAll();
   if (!snap.ok) return { ok: false, status: 500, body: { ok: false, error: "Snapshot-all failed", debug: snap } };
 
-  // Build map for timestamp/session/ext%
   const snapMap = new Map();
   for (const x of snap.rows) {
     const t = String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase();
@@ -844,6 +880,7 @@ async function buildRowsFromSnapshotAll({ cap, limit, session, mode, query }) {
 
   const aggsErrors = [];
   rows = await attachIndicatorsIfEnabled(rows, mode, aggsErrors);
+
   rows = applySmartFilters(rows, query || {});
   rows = finalizeRows(rows, mode);
 
@@ -857,16 +894,25 @@ async function buildRowsFromSnapshotAll({ cap, limit, session, mode, query }) {
   const lim = clamp(Number(limit || 100), 5, 500);
   rows = rows.slice(0, lim);
 
-  return { ok: true, status: 200, body: { ok: true, mode, session: session || null, cap, results: rows, aggsErrors: DEBUG ? aggsErrors.slice(0, 12) : undefined } };
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      ok: true,
+      mode,
+      session: session || null,
+      cap: String(cap || "all").toLowerCase(),
+      results: rows,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 12) : undefined,
+    },
+  };
 }
 
 // ============================================================================
 // SECTION 16 — UI Renderer (includes TradingView chart modal + disclaimer 5s)
-// What it is: HTML/CSS/JS UI template
-// Feature: independent pages + click ticker -> chart + disclaimer popup
-// Key kỹ thuật: iframe embed (no heavy JS) + localStorage TTL
 // Debug tag: SECTION16_UI_RENDER
 // ============================================================================
+
 function disclaimerContent() {
   const simpleTitle = `⚠️ ${BRAND.name} Disclaimer`;
   const proTitle = `⚠️ Risk Disclosure & No Investment Advice`;
@@ -908,12 +954,12 @@ function renderUI(preset = {}) {
   const PRESET = {
     page: preset.page || "dashboard",
     title: preset.title || "Dashboard",
-    source: preset.source || "list",          // list | top-movers | scan | premarket | aftermarket | snapshot-all | halts
-    group: preset.group || "gainers",         // for /list
-    direction: preset.direction || "all",     // for /top-movers
+    source: preset.source || "list",
+    group: preset.group || "gainers",
+    direction: preset.direction || "all",
     cap: preset.cap || "all",
     limit: preset.limit || 50,
-    mode: preset.mode || "daytrade",          // daytrade | pro
+    mode: preset.mode || "daytrade",
   };
 
   const nav = [
@@ -950,24 +996,20 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
 .brandName{ font-weight:900; font-size:14px; letter-spacing:.3px; }
 .brandSub{ font-size:12px; color:#a7adc2; margin-top:3px; }
 .pill{ font-size:12px; padding:6px 10px; border-radius:999px; background:#121622; border:1px solid rgba(255,255,255,.12); color:#c8cde0; white-space:nowrap; }
-
 .nav{ display:flex; gap:10px; flex-wrap:wrap; padding-bottom:14px; }
 .nav a{ text-decoration:none; color:#c8cde0; background:#121622; border:1px solid rgba(255,255,255,.12); padding:8px 10px; border-radius:999px; font-size:12px; opacity:.70; }
 .nav a.active{ opacity:1; border-color: rgba(255,255,255,.22); }
 .nav a:hover{ opacity:1; }
-
 .panel{ border-bottom:1px solid rgba(255,255,255,.06); padding:14px 0; }
 .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
 select,input,button{ background:#121622; border:1px solid rgba(255,255,255,.12); color:#e6e8ef; border-radius:12px; padding:9px 10px; font-size:13px; outline:none; }
 button{ cursor:pointer; }
 button:hover{ border-color: rgba(255,255,255,.22); }
 .hint{ font-size:12px; color:#a7adc2; margin-top:10px; line-height:1.4; }
-
 .card{ border:1px solid rgba(255,255,255,.10); border-radius:14px; overflow:hidden; margin:16px 0; }
 .cardHead{ background:#121622; border-bottom:1px solid rgba(255,255,255,.08); padding:10px 12px; display:flex; align-items:center; justify-content:space-between; gap:10px;}
 .title{ font-size:13px; font-weight:900; }
 .meta{ font-size:12px; color:#a7adc2; }
-
 table{ width:100%; border-collapse:collapse; }
 th,td{ padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.06); font-size:13px; }
 th{ text-align:left; color:#a7adc2; font-weight:700; position:sticky; top:0; background:#0b0d12; z-index:5; }
@@ -976,24 +1018,17 @@ tr:hover td{ background: rgba(255,255,255,.03); }
 .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .symLink{ color:#e6e8ef; text-decoration:none; border-bottom:1px dashed rgba(255,255,255,.25); cursor:pointer; }
 .symLink:hover{ border-bottom-color: rgba(255,255,255,.55); }
-
 tr.haltRow td { background: rgba(255, 80, 80, .10) !important; }
 tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
-
 .err{ white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; color:#ffb4b4; background:#1a0f12; border:1px solid rgba(255,128,128,.25); border-radius:12px; padding:10px 12px; margin-top:12px; display:none; }
-
 .watermark{ position: fixed; bottom: 12px; right: 16px; font-size: 11px; color: rgba(230,232,239,.35); letter-spacing: .3px; pointer-events:none; user-select:none; z-index:9999; }
-
 .modalBack{ position:fixed; inset:0; background: rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:60; }
 .modal{ width:min(1100px, 94vw); height:min(720px, 88vh); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; overflow:hidden; box-shadow: 0 18px 70px rgba(0,0,0,.55); }
 .modalTop{ display:flex; gap:10px; align-items:center; justify-content:space-between; padding:10px 12px; background:#121622; border-bottom:1px solid rgba(255,255,255,.10); }
 .modalTitle{ font-weight:900; font-size:13px; }
-.modalTools{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 .modalClose{ cursor:pointer; border:1px solid rgba(255,255,255,.18); background:#121622; color:#e6e8ef; border-radius:10px; padding:8px 10px; }
-.modalClose:hover{ border-color: rgba(255,255,255,.28); }
 .chartBox{ width:100%; height: calc(100% - 52px); }
 .chartBox iframe{ width:100%; height:100%; border:0; }
-
 .discBack{ position:fixed; inset:0; background: rgba(0,0,0,.68); display:none; align-items:center; justify-content:center; z-index:80; }
 .disc{ width:min(720px, 92vw); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; box-shadow: 0 18px 70px rgba(0,0,0,.60); overflow:hidden; }
 .discTop{ padding:12px 14px; background:#121622; border-bottom:1px solid rgba(255,255,255,.10); display:flex; align-items:center; justify-content:space-between; gap:10px;}
@@ -1003,7 +1038,6 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
 .discBody li{ margin:6px 0; }
 .discFoot{ padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; background:#0b0d12; border-top:1px solid rgba(255,255,255,.08); }
 .discBtn{ cursor:pointer; border:1px solid rgba(255,255,255,.18); background:#121622; color:#e6e8ef; border-radius:10px; padding:9px 10px; font-size:13px; }
-.discBtn:hover{ border-color: rgba(255,255,255,.28); }
 .discNote{ font-size:12px; color:#a7adc2; display:flex; gap:8px; align-items:center; }
 .fadeOut{ animation: fadeOut .28s ease forwards; }
 @keyframes fadeOut { to { opacity: 0; transform: translateY(2px); } }
@@ -1022,7 +1056,6 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
       </div>
       <div class="pill">${PRESET.title} • Mode: <b>${PRESET.mode}</b></div>
     </div>
-
     <div class="nav">
       ${nav.map((x) => `<a href="${x.href}" class="${x.k === PRESET.page ? "active" : ""}">${x.label}</a>`).join("")}
     </div>
@@ -1061,6 +1094,15 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
       <span class="pill" id="status">Idle</span>
     </div>
 
+    <!-- AUTO REFRESH UI -->
+    <div class="row" style="margin-top:10px;">
+      <span class="pill"><input id="autoOn" type="checkbox" style="transform:translateY(1px)"/> Auto Refresh</span>
+      <input id="autoSec" placeholder="Refresh seconds (default 30)" style="min-width:220px;" />
+      <span class="pill" id="countdownBadge">-</span>
+      <button id="applyAutoBtn">Apply</button>
+      <button id="stopAutoBtn">Stop</button>
+    </div>
+
     <div class="hint">
       Click ticker → TradingView chart (modal). Ctrl/Cmd+Click or "Open new window" → new tab.
       Vol/Float icons show only when ≥ 1.5x. HALT rows show ⛔ and will be highlighted.
@@ -1070,10 +1112,7 @@ tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
   </div>
 </div>
 
-<div class="wrap">
-  <div id="out"></div>
-</div>
-
+<div class="wrap"><div id="out"></div></div>
 <div class="watermark">${BRAND.watermark}</div>
 
 <!-- Chart Modal -->
@@ -1118,12 +1157,13 @@ const out = byId("out");
 const errBox = byId("errBox");
 const statusEl = byId("status");
 
-function setStatus(t){ statusEl.textContent = t; }
+function setStatus(t){ if(statusEl) statusEl.textContent = t; }
 function showError(obj){
+  if(!errBox) return;
   errBox.style.display="block";
   errBox.textContent = typeof obj==="string" ? obj : JSON.stringify(obj,null,2);
 }
-function clearError(){ errBox.style.display="none"; errBox.textContent=""; }
+function clearError(){ if(!errBox) return; errBox.style.display="none"; errBox.textContent=""; }
 
 function fmtNum(x, d=2){
   if (x===null || x===undefined) return "-";
@@ -1161,30 +1201,29 @@ function tvEmbedUrl(symbol, tf){
 const modalBack = byId("modalBack");
 const modalTitle = byId("modalTitle");
 const chartBox = byId("chartBox");
-
-function openModal(){ modalBack.style.display="flex"; modalBack.setAttribute("aria-hidden","false"); }
-function closeModal(){ modalBack.style.display="none"; modalBack.setAttribute("aria-hidden","true"); chartBox.innerHTML=""; }
+function openModal(){ if(!modalBack) return; modalBack.style.display="flex"; modalBack.setAttribute("aria-hidden","false"); }
+function closeModal(){ if(!modalBack) return; modalBack.style.display="none"; modalBack.setAttribute("aria-hidden","true"); if(chartBox) chartBox.innerHTML=""; }
 
 window.handleTickerClick = function(ev, sym){
-  const tf = byId("tfSel").value || "5";
-  const forceNew = byId("openNewWin").checked;
+  const tf = byId("tfSel")?.value || "5";
+  const forceNew = Boolean(byId("openNewWin")?.checked);
   const modifier = ev && (ev.ctrlKey || ev.metaKey);
 
   if (forceNew || modifier){
     const url = "https://www.tradingview.com/chart/?symbol="+encodeURIComponent("NASDAQ:"+sym)+"&interval="+encodeURIComponent(tf);
-    const newTab = byId("newTab").checked !== false;
+    const newTab = byId("newTab")?.checked !== false;
     if (newTab) window.open(url, "_blank", "noopener,noreferrer");
     else window.location.href = url;
     return;
   }
 
-  modalTitle.textContent = "${BRAND.mark} ${BRAND.name} Chart — " + sym + " ("+tf+")";
+  if(modalTitle) modalTitle.textContent = "${BRAND.mark} ${BRAND.name} Chart — " + sym + " ("+tf+")";
   openModal();
-  chartBox.innerHTML = '<iframe loading="lazy" src="'+tvEmbedUrl(sym, tf)+'"></iframe>';
+  if(chartBox) chartBox.innerHTML = '<iframe loading="lazy" src="'+tvEmbedUrl(sym, tf)+'"></iframe>';
 };
 
-byId("closeBtn").addEventListener("click", closeModal);
-modalBack.addEventListener("click", (e)=>{ if(e.target===modalBack) closeModal(); });
+if (byId("closeBtn")) byId("closeBtn").addEventListener("click", closeModal);
+if (modalBack) modalBack.addEventListener("click", (e)=>{ if(e.target===modalBack) closeModal(); });
 document.addEventListener("keydown", (e)=>{ if(e.key==="Escape") closeModal(); });
 
 // Render table
@@ -1196,7 +1235,10 @@ function renderTable(data){
     }
   }
 
-  const meta = PRESET.page + " • cap="+byId("cap").value+" • "+rows.length+" rows";
+  const cap = byId("cap")?.value || "all";
+  const meta = PRESET.page + " • cap="+cap+" • " + rows.length + " rows";
+
+  if(!out) return;
   out.innerHTML = \`
     <div class="card">
       <div class="cardHead">
@@ -1251,6 +1293,7 @@ function renderTable(data){
       </div>
     </div>\`;
 }
+
 // -------------------- AUTO REFRESH (30s default) --------------------
 let autoTimer = null;
 let countdownTimer = null;
@@ -1272,7 +1315,6 @@ function stopAuto(){
 
 function startAuto(seconds){
   stopAuto();
-
   const sec = Math.max(5, Math.min(3600, Number(seconds) || 30));
   const on = byId("autoOn");
   if (on) on.checked = true;
@@ -1293,26 +1335,26 @@ function startAuto(seconds){
 function applyAuto(){
   const on = byId("autoOn");
   if (!on) return;
-
   if (!on.checked) { stopAuto(); return; }
 
   const secInput = byId("autoSec");
   const sec = secInput ? secInput.value : "30";
   startAuto(sec);
 }
+
 async function run(){
   clearError();
-  out.innerHTML="";
+  if(out) out.innerHTML="";
   setStatus("Loading...");
 
-  const cap = byId("cap").value;
-  const limit = byId("limit").value;
+  const cap = byId("cap")?.value || "all";
+  const limit = byId("limit")?.value || "50";
 
   let url = "";
   if (PRESET.source === "top-movers"){
     url = "/top-movers?direction="+encodeURIComponent(PRESET.direction||"all")+"&cap="+encodeURIComponent(cap)+"&limit="+encodeURIComponent(limit);
   } else if (PRESET.source === "scan"){
-    const symbols = (byId("symbols").value || "NVDA,TSLA,AAPL").trim();
+    const symbols = (byId("symbols")?.value || "NVDA,TSLA,AAPL").trim();
     url = "/scan?symbols="+encodeURIComponent(symbols)+"&mode="+encodeURIComponent(PRESET.mode||"daytrade");
   } else if (PRESET.source === "premarket"){
     url = "/premarket?cap="+encodeURIComponent(cap)+"&limit="+encodeURIComponent(limit);
@@ -1337,7 +1379,6 @@ async function run(){
     setStatus("OK ("+(data.results?.length||0)+" rows)");
     renderTable(data);
 
-    // show server debug errors if present
     if(data.snapshotErrors && data.snapshotErrors.length) showError({snapshotErrors:data.snapshotErrors});
     if(data.aggsErrors && data.aggsErrors.length) showError({aggsErrors:data.aggsErrors});
   }catch(e){
@@ -1347,23 +1388,17 @@ async function run(){
 }
 
 function setPreset(){
-  byId("cap").value = PRESET.cap || "all";
-  byId("limit").value = String(PRESET.limit || 50);
-  byId("symbols").value = "NVDA,TSLA,AAPL";
+  if(byId("cap")) byId("cap").value = PRESET.cap || "all";
+  if(byId("limit")) byId("limit").value = String(PRESET.limit || 50);
+  if(byId("symbols")) byId("symbols").value = "NVDA,TSLA,AAPL";
+  if(byId("autoSec")) byId("autoSec").value = "30";
+  if(byId("countdownBadge")) byId("countdownBadge").textContent = "-";
 }
-byId("applyAutoBtn").addEventListener("click", applyAuto);
-byId("stopAutoBtn").addEventListener("click", stopAuto);
 
-// optional: nếu user click Run thì reset countdown (không bắt buộc)
-byId("runBtn").addEventListener("click", () => {
-  const badge = byId("countdownBadge");
-  if (badge && byId("autoOn")?.checked) badge.textContent = "Refreshing...";
-});
+if (byId("runBtn")) byId("runBtn").addEventListener("click", run);
+if (byId("applyAutoBtn")) byId("applyAutoBtn").addEventListener("click", applyAuto);
+if (byId("stopAutoBtn")) byId("stopAutoBtn").addEventListener("click", stopAuto);
 
-const autoSec = byId("autoSec");
-if (autoSec) autoSec.value = "30";
-const badge = byId("countdownBadge");
-if (badge) badge.textContent = "-";
 setPreset();
 run();
 
@@ -1378,6 +1413,7 @@ function showDisclaimer(){
     const until=Number(localStorage.getItem(DISC_KEY)||"0");
     if(Number.isFinite(until) && until>Date.now()) return;
   }catch(e){}
+  if(!discBack) return;
   discBack.style.display="flex";
   discBack.setAttribute("aria-hidden","false");
   setTimeout(()=>{ closeDisclaimer(); }, ${DISCLAIMER_AUTO_CLOSE_MS});
@@ -1403,14 +1439,14 @@ function closeDisclaimer(){
     discBack.setAttribute("aria-hidden","true");
   }
 }
-discCloseBtn.addEventListener("click", closeDisclaimer);
-discBack.addEventListener("click",(e)=>{ if(e.target===discBack) closeDisclaimer(); });
-
+if (discCloseBtn) discCloseBtn.addEventListener("click", closeDisclaimer);
+if (discBack) discBack.addEventListener("click",(e)=>{ if(e.target===discBack) closeDisclaimer(); });
 showDisclaimer();
 </script>
 </body>
 </html>`;
 }
+
 
 // ============================================================================
 // SECTION 17 — UI Routes (Independent Scanners)

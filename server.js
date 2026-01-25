@@ -1242,7 +1242,395 @@ function renderUI(preset = {}) {
   </div>
 </div>
 
+<script src="require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
+
+const app = express();
+app.use(express.json());
+
+const PORT = Number(process.env.PORT || 3000);
+
+const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
+const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
+const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
+
+const MASSIVE_MOVER_URL = String(
+  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
+).trim();
+
+const MASSIVE_TICKER_SNAPSHOT_URL = String(
+  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
+).trim();
+
+const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
+const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
+const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
+
+function envMissing() {
+  const miss = [];
+  if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
+  if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
+  if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
+  return miss;
+}
+
+function auth(params = {}, headers = {}) {
+  const t = String(MASSIVE_AUTH_TYPE).toLowerCase();
+  if (t === "query") params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
+  else if (t === "xapi") headers["x-api-key"] = MASSIVE_API_KEY;
+  else if (t === "bearer") headers["authorization"] = `Bearer ${MASSIVE_API_KEY}`;
+  else params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
+
+  headers["user-agent"] =
+    headers["user-agent"] ||
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+
+  return { params, headers };
+}
+
+function clamp(x, a, b) {
+  return Math.max(a, Math.min(b, x));
+}
+function n(x) {
+  const v = Number(x);
+  return Number.isFinite(v) ? v : null;
+}
+function round2(x) {
+  const v = n(x);
+  return v === null ? null : Number(v.toFixed(2));
+}
+function parseSymbols(input) {
+  return String(input || "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+async function mapPool(items, concurrency, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+
+  async function worker() {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return out;
+}
+
+async function safeGet(url, { params, headers }) {
+  try {
+    const r = await axios.get(url, { params, headers, timeout: 25000, validateStatus: () => true });
+    return { ok: r.status < 400, status: r.status, data: r.data, url };
+  } catch (e) {
+    return { ok: false, status: null, data: null, url, error: String(e?.message || e) };
+  }
+}
+
+async function fetchMovers(direction = "gainers") {
+  const d = String(direction || "gainers").toLowerCase().trim();
+  const directionSafe = d === "losers" ? "losers" : "gainers";
+  const url = `${MASSIVE_MOVER_URL.replace(/\/+$/, "")}/${directionSafe}`;
+
+  const params = {};
+  const headers = {};
+  if (INCLUDE_OTC) params.include_otc = "true";
+  const a = auth(params, headers);
+
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+  const rows = Array.isArray(r.data?.tickers) ? r.data.tickers : Array.isArray(r.data?.results) ? r.data.results : [];
+  return { ok: r.ok && Array.isArray(rows), status: r.status, url, rows };
+}
+
+async function fetchTickerSnapshot(ticker) {
+  const url = `${MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "")}/${encodeURIComponent(String(ticker || "").trim().toUpperCase())}`;
+  const a = auth({}, {});
+  const r = await safeGet(url, { params: a.params, headers: a.headers });
+  return { ok: r.ok, status: r.status, url, data: r.data };
+}
+
+function normalizeSnapshotAuto(ticker, snap) {
+  const root = snap?.results ?? snap ?? {};
+  const day = root?.day ?? root?.todays ?? root?.today ?? null;
+  const prev = root?.prevDay ?? root?.previousDay ?? root?.prev ?? null;
+
+  const price =
+    n(root?.lastTrade?.p) ??
+    n(root?.last) ??
+    n(root?.price) ??
+    n(day?.c ?? day?.close ?? root?.close) ??
+    null;
+
+  const open = n(day?.o ?? day?.open ?? root?.open) ?? null;
+  const prevClose = n(prev?.c ?? prev?.close ?? root?.prevClose ?? root?.previousClose) ?? null;
+
+  const volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
+  const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : null;
+  const pricePct = price !== null && prevClose !== null && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null;
+
+  return {
+    symbol: String(ticker || "").toUpperCase(),
+    price: price !== null ? round2(price) : null,
+    pricePct: pricePct !== null ? round2(pricePct) : null,
+    gapPct: gapPct !== null ? round2(gapPct) : null,
+    volume: volume !== null ? Math.round(volume) : null,
+  };
+}
+
+function renderUI() {
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ALGTP™ Scanner</title>
+<style>
+  :root{ color-scheme: dark; }
+  body{ margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0d12; color:#e6e8ef;}
+  header{ padding:16px 18px; border-bottom:1px solid rgba(255,255,255,.08); position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: blur(10px); }
+  .wrap{ max-width:1200px; margin:0 auto; }
+  .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:12px 18px; }
+  select,input,button{ background:#121622; border:1px solid rgba(255,255,255,.12); color:#e6e8ef; border-radius:12px; padding:9px 10px; font-size:13px; outline:none; }
+  button{ cursor:pointer; }
+  .card{ margin:18px; border:1px solid rgba(255,255,255,.10); border-radius:14px; overflow:hidden; }
+  .cardHead{ padding:10px 12px; background:#121622; border-bottom:1px solid rgba(255,255,255,.08); display:flex; justify-content:space-between; }
+  table{ width:100%; border-collapse:collapse; }
+  th,td{ padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.06); font-size:13px; }
+  th{ color:#a7adc2; text-align:left; }
+  .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  .right{ text-align:right; }
+  .symLink{ color:#e6e8ef; text-decoration:none; border-bottom:1px dashed rgba(255,255,255,.25); cursor:pointer; }
+  .modalBack{ position:fixed; inset:0; background: rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:50; }
+  .modal{ width:min(1100px,94vw); height:min(720px,88vh); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; overflow:hidden; }
+  .modalTop{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px; background:#121622; border-bottom:1px solid rgba(255,255,255,.10); }
+  .chartBox{ width:100%; height: calc(100% - 52px); }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div style="font-weight:800;">🔥 ALGTP™ — Algorithmic Trading Platform</div>
+    <div style="font-size:12px;color:#a7adc2;margin-top:6px;">Smart Market Scanner (Core)</div>
+  </div>
+</header>
+
+<div class="row">
+  <select id="direction">
+    <option value="gainers">Gainers</option>
+    <option value="losers">Losers</option>
+  </select>
+  <input id="limit" placeholder="Limit (default 50)" style="min-width:180px;"/>
+  <button id="runBtn">Run</button>
+  <span id="status" style="font-size:12px;color:#a7adc2;">Idle</span>
+</div>
+
+<div id="out"></div>
+
+<!-- Chart Modal -->
+<div class="modalBack" id="modalBack">
+  <div class="modal">
+    <div class="modalTop">
+      <div id="modalTitle" style="font-weight:800;font-size:13px;">ALGTP™ Chart</div>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <select id="exSel">
+          <option value="NASDAQ">NASDAQ</option>
+          <option value="NYSE">NYSE</option>
+          <option value="AMEX">AMEX</option>
+        </select>
+        <select id="tfSel">
+          <option value="1">1m</option>
+          <option value="5" selected>5m</option>
+          <option value="15">15m</option>
+          <option value="60">1h</option>
+          <option value="240">4h</option>
+          <option value="D">1D</option>
+          <option value="W">1W</option>
+        </select>
+        <button id="closeBtn">Close</button>
+      </div>
+    </div>
+    <div class="chartBox" id="chartBox"></div>
+  </div>
+</div>
+
 <script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+const byId = (id)=>document.getElementById(id);
+const out = byId("out");
+const status = byId("status");
+
+const modalBack = byId("modalBack");
+const modalTitle = byId("modalTitle");
+const chartBox = byId("chartBox");
+const exSel = byId("exSel");
+const tfSel = byId("tfSel");
+let currentSymbol = null;
+
+function openModal(){ modalBack.style.display="flex"; }
+function closeModal(){ modalBack.style.display="none"; chartBox.innerHTML=""; currentSymbol=null; }
+byId("closeBtn").addEventListener("click", closeModal);
+modalBack.addEventListener("click",(e)=>{ if(e.target===modalBack) closeModal(); });
+document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeModal(); });
+
+function buildTvSymbol(sym){ return (exSel.value||"NASDAQ")+":"+sym; }
+function renderChart(sym){
+  chartBox.innerHTML = '<div id="tv_chart" style="width:100%;height:100%;"></div>';
+  new TradingView.widget({
+    autosize:true,
+    symbol: buildTvSymbol(sym),
+    interval: tfSel.value||"5",
+    timezone:"America/New_York",
+    theme:"dark",
+    style:"1",
+    locale:"en",
+    enable_publishing:false,
+    allow_symbol_change:true,
+    container_id:"tv_chart"
+  });
+}
+function openChart(sym){
+  currentSymbol = sym;
+  modalTitle.textContent = "ALGTP™ Chart — " + sym;
+  openModal();
+  renderChart(sym);
+}
+window.handleTickerClick = function(ev, sym){
+  const modifier = ev && (ev.ctrlKey || ev.metaKey);
+  if(modifier){
+    const url = "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(buildTvSymbol(sym)) + "&interval=" + encodeURIComponent(tfSel.value||"5");
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  openChart(sym);
+};
+exSel.addEventListener("change", ()=>{ if(currentSymbol) renderChart(currentSymbol); });
+tfSel.addEventListener("change", ()=>{ if(currentSymbol) renderChart(currentSymbol); });
+
+function fmtNum(x){ if(x==null) return "-"; const v=Number(x); return Number.isFinite(v)?v.toFixed(2):"-"; }
+function fmtInt(x){ if(x==null) return "-"; const v=Number(x); return Number.isFinite(v)?Math.round(v).toLocaleString():"-"; }
+
+async function run(){
+  out.innerHTML = "";
+  status.textContent = "Loading...";
+  const dir = byId("direction").value;
+  const lim = byId("limit").value.trim() || "50";
+  const url = "/list?group=" + (dir==="losers"?"topLosers":"topGainers") + "&cap=all&limit=" + encodeURIComponent(lim);
+
+  const r = await fetch(url);
+  const data = await r.json();
+  if(!data.ok){ status.textContent = "Error"; out.innerHTML = "<pre>"+JSON.stringify(data,null,2)+"</pre>"; return; }
+  status.textContent = "OK (" + data.results.length + " rows)";
+
+  out.innerHTML = \`
+    <div class="card">
+      <div class="cardHead"><div style="font-weight:800;">Scan Group</div><div style="color:#a7adc2;font-size:12px;">\${data.group} • \${data.results.length} rows</div></div>
+      <table>
+        <thead><tr>
+          <th>Symbol</th><th class="right">Price</th><th class="right">Price%</th><th class="right">Gap%</th><th class="right">Vol</th>
+        </tr></thead>
+        <tbody>
+          \${data.results.map(r=>\`
+            <tr>
+              <td class="mono"><a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'\${String(r.symbol||"").replace(/'/g,"")}')">\${r.symbol||""}</a></td>
+              <td class="right mono">\${fmtNum(r.price)}</td>
+              <td class="right mono">\${fmtNum(r.pricePct)}%</td>
+              <td class="right mono">\${fmtNum(r.gapPct)}%</td>
+              <td class="right mono">\${fmtInt(r.volume)}</td>
+            </tr>\`).join("")}
+        </tbody>
+      </table>
+    </div>\`;
+}
+byId("runBtn").addEventListener("click", run);
+run();
+</script>
+</body></html>`;
+}
+
+// UI
+app.get("/ui", (req, res) => res.type("html").send(renderUI()));
+
+// Core API
+app.get("/", (req, res) => res.json({ ok: true, message: "ALGTP™ server running", ui: "/ui" }));
+app.get("/api", (req, res) => res.json({ ok: true, envMissing: envMissing() }));
+
+app.get("/list", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+
+    const group = String(req.query.group || "topGainers");
+    const limit = clamp(Number(req.query.limit || 50), 5, 200);
+
+    const direction = group === "topLosers" ? "losers" : "gainers";
+    const movers = await fetchMovers(direction);
+    if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", debug: movers });
+
+    const tickers = movers.rows
+      .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, limit);
+
+    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+      const r = await fetchTickerSnapshot(t);
+      return { ticker: t, ...r };
+    });
+
+    const good = snaps.filter((x) => x.ok);
+    const bad = snaps.filter((x) => !x.ok);
+
+    const rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+
+    res.json({
+      ok: true,
+      group,
+      results: rows,
+      snapshotErrors: DEBUG ? bad.slice(0, 10) : undefined,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// SECTION 21 (standalone route inside same server.js)
+app.get("/top-movers", async (req, res) => {
+  try {
+    const miss = envMissing();
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+
+    const direction = String(req.query.direction || "gainers").toLowerCase() === "losers" ? "losers" : "gainers";
+    const limit = clamp(Number(req.query.limit || 80), 5, 200);
+
+    const movers = await fetchMovers(direction);
+    if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", debug: movers });
+
+    const tickers = movers.rows
+      .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, limit);
+
+    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+      const r = await fetchTickerSnapshot(t);
+      return { ticker: t, ...r };
+    });
+
+    const good = snaps.filter((x) => x.ok);
+    const rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+    rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+
+    res.json({ ok: true, module: "top-movers", direction, limit, results: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.listen(PORT, () => console.log("✅ ALGTP™ running http://localhost:" + PORT + "/ui"));
+"></script>
 
 <script>
 const PRESET = ${JSON.stringify({

@@ -1351,8 +1351,19 @@ function setPreset(){
   byId("limit").value = String(PRESET.limit || 50);
   byId("symbols").value = "NVDA,TSLA,AAPL";
 }
-byId("runBtn").addEventListener("click", run);
+byId("applyAutoBtn").addEventListener("click", applyAuto);
+byId("stopAutoBtn").addEventListener("click", stopAuto);
 
+// optional: nếu user click Run thì reset countdown (không bắt buộc)
+byId("runBtn").addEventListener("click", () => {
+  const badge = byId("countdownBadge");
+  if (badge && byId("autoOn")?.checked) badge.textContent = "Refreshing...";
+});
+
+const autoSec = byId("autoSec");
+if (autoSec) autoSec.value = "30";
+const badge = byId("countdownBadge");
+if (badge) badge.textContent = "-";
 setPreset();
 run();
 

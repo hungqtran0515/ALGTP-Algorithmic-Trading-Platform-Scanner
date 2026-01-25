@@ -3,10 +3,16 @@
  * 🔥 ALGTP™ – Algorithmic Trading Platform
  * Smart Market Scanner (Day Trade Core + Pro/Extended Modules)
  * ----------------------------------------------------------------------------
- * This is a single-file Node.js server (CommonJS) that serves:
- *  - UI: /ui (Dashboard) + tabs (Gainers/Losers/Gappers/Cap buckets/Pre/After/Snapshot-All)
- *  - API: /list, /scan, /premarket, /aftermarket, /snapshot-all, /halts
- *  - Help: /help (How to use)
+ * Single-file Node.js server (CommonJS)
+ *
+ * UI:
+ *  - /ui (Dashboard) + tabs (Gainers/Losers/Gappers/Cap buckets/Pre/After/Snapshot-All)
+ * API:
+ *  - /list, /scan, /premarket, /aftermarket, /snapshot-all, /halts
+ * Help:
+ *  - /help
+ * Extra (Standalone inside same server.js):
+ *  - /top-movers  (SECTION 21)
  *
  * ENV (minimum):
  *  - PORT=3000
@@ -45,9 +51,6 @@
 
 // ============================================================================
 // SECTION 00 — Brand Identity & Logo System
-// What it is: Brand constants + logo/text mark rules
-// Feature: Logo in Header/Popup/Table/Alerts/Chart
-// Key kỹ thuật: text fallback + emoji brand mark (no extra requests)
 // Debug tag: SECTION00_BRAND_LOGO
 // ============================================================================
 const BRAND = {
@@ -60,23 +63,16 @@ const BRAND = {
 
 // ============================================================================
 // SECTION 01 — Imports + App Boot
-// What it is: Initialize server & core libs
-// Feature: Express + Axios + Dotenv
-// Key kỹ thuật: CommonJS stable runtime
 // Debug tag: SECTION01_BOOT_IMPORTS
 // ============================================================================
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-
 const app = express();
 app.use(express.json());
 
 // ============================================================================
 // SECTION 02 — ENV Config + Runtime Modes
-// What it is: All env config + daytrade/pro toggles
-// Feature: API URLs, concurrency, debug, feature flags
-// Key kỹ thuật: clamp & safe parsing
 // Debug tag: SECTION02_ENV_CONFIG
 // ============================================================================
 const PORT = Number(process.env.PORT || 3000);
@@ -94,6 +90,7 @@ const MASSIVE_TICKER_SNAPSHOT_URL = String(
 ).trim();
 
 const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
+
 const MASSIVE_SNAPSHOT_ALL_URL = String(
   process.env.MASSIVE_SNAPSHOT_ALL_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
@@ -109,7 +106,6 @@ const ENABLE_5M_INDICATORS_PRO = String(process.env.ENABLE_5M_INDICATORS_PRO || 
 
 const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
 const AGGS_INCLUDE_PREPOST = String(process.env.AGGS_INCLUDE_PREPOST || "true").toLowerCase() === "true";
-
 const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
 const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
 
@@ -127,9 +123,6 @@ const DISCLAIMER_AUTO_CLOSE_MS = Math.max(1000, Math.min(30000, Number(process.e
 
 // ============================================================================
 // SECTION 03 — Core Helpers (parse/number/clamp/pool)
-// What it is: Utilities used system-wide
-// Feature: parsing, rounding, concurrency pool
-// Key kỹ thuật: async worker pool to avoid API flood
 // Debug tag: SECTION03_HELPERS_POOL
 // ============================================================================
 function clamp(x, a, b) {
@@ -177,9 +170,6 @@ function ymd(d) {
 
 // ============================================================================
 // SECTION 04 — Auth Layer (query/xapi/bearer)
-// What it is: Attach API key per request
-// Feature: query/x-api-key/bearer
-// Key kỹ thuật: stable user-agent + merge params/headers
 // Debug tag: SECTION04_AUTH
 // ============================================================================
 function auth(params = {}, headers = {}) {
@@ -192,24 +182,18 @@ function auth(params = {}, headers = {}) {
   headers["user-agent"] =
     headers["user-agent"] ||
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
-
   return { params, headers };
 }
 
 // ============================================================================
 // SECTION 05 — Safe HTTP (Axios Guard)
-// What it is: Safe axios wrapper + debug error detail
-// Feature: safeGet returns ok/status/data
-// Key kỹ thuật: timeout + validateStatus; body preview
 // Debug tag: SECTION05_SAFE_HTTP
 // ============================================================================
 function axiosFail(e) {
   if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
-
   const code = e.code || null;
   const msg = e.message || "axios error";
   const url = e.config?.url || null;
-
   if (!e.response) return { kind: "network", code, message: msg, url };
 
   const status = e.response.status;
@@ -234,15 +218,11 @@ async function safeGet(url, { params, headers }) {
 
 // ============================================================================
 // SECTION 06 — Data Sources: Movers + Ticker Snapshot + Snapshot-All
-// What it is: Market data sources
-// Feature: fetch movers, ticker snapshot, snapshot-all
-// Key kỹ thuật: auto-detect arrays tickers/results/data
 // Debug tag: SECTION06_SOURCES_MOVERS_SNAPSHOT
 // ============================================================================
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
   const directionSafe = d === "losers" ? "losers" : "gainers";
-
   const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
   const url = `${base}/${directionSafe}`;
 
@@ -261,14 +241,7 @@ async function fetchMovers(direction = "gainers") {
     ? r.data.data
     : null;
 
-  return {
-    ok: r.ok && Array.isArray(rows),
-    url,
-    status: r.status,
-    rows: Array.isArray(rows) ? rows : [],
-    sample: Array.isArray(rows) ? rows[0] : r.data,
-    errorDetail: r.errorDetail,
-  };
+  return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows: Array.isArray(rows) ? rows : [], errorDetail: r.errorDetail };
 }
 
 async function fetchTickerSnapshot(ticker) {
@@ -299,21 +272,11 @@ async function fetchSnapshotAll() {
     ? r.data.data
     : null;
 
-  return {
-    ok: r.ok && Array.isArray(rows),
-    url,
-    status: r.status,
-    rows: Array.isArray(rows) ? rows : [],
-    sample: Array.isArray(rows) ? rows[0] : r.data,
-    errorDetail: r.errorDetail,
-  };
+  return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows: Array.isArray(rows) ? rows : [], errorDetail: r.errorDetail };
 }
 
 // ============================================================================
 // SECTION 07 — Normalize Snapshot + Auto Field Detect
-// What it is: Normalize raw API JSON into unified row format
-// Feature: price/pct/gap/vol/float/mcap + categories
-// Key kỹ thuật: BFS findFirstNumberByKeys; fallback mcap estimate
 // Debug tag: SECTION07_NORMALIZE
 // ============================================================================
 function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
@@ -326,7 +289,6 @@ function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
   while (q.length && visited < maxNodes) {
     const { v, path } = q.shift();
     visited++;
-
     if (!v || typeof v !== "object") continue;
 
     if (Array.isArray(v)) {
@@ -345,7 +307,6 @@ function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
         const num = n(val);
         if (num !== null) return { value: num, path: `${path}.${k}`, keyMatched: k };
       }
-
       if (val && typeof val === "object") q.push({ v: val, path: `${path}.${k}` });
     }
   }
@@ -360,7 +321,6 @@ function capCategory(marketCap) {
   if (mc < 10_000_000_000) return "mid";
   return "big";
 }
-
 function floatCategory(floatShares) {
   const fs = n(floatShares);
   if (fs === null) return null;
@@ -390,7 +350,6 @@ function normalizeSnapshotAuto(ticker, snap) {
   let open = n(day?.o ?? day?.open ?? root?.open) ?? null;
   let volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
 
-  // pricePct from API, else compute from prevClose
   let pricePct =
     n(root?.todaysChangePerc) ??
     n(root?.todaysChangePercent) ??
@@ -398,37 +357,13 @@ function normalizeSnapshotAuto(ticker, snap) {
     n(root?.changePercent) ??
     null;
 
-  if (price === null) {
-    const fp = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]);
-    price = fp.value;
-  }
-  if (open === null) {
-    const fo = findFirstNumberByKeys(root, ["open", "o"]);
-    open = fo.value;
-  }
+  if (price === null) price = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]).value;
+  if (open === null) open = findFirstNumberByKeys(root, ["open", "o"]).value;
 
   let prevC = prevClose;
-  if (prevC === null) {
-    const fpc = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]);
-    prevC = fpc.value;
-  }
+  if (prevC === null) prevC = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]).value;
 
-  if (volume === null) {
-    const fv = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]);
-    volume = fv.value;
-  }
-
-  if (pricePct === null) {
-    const fchg = findFirstNumberByKeys(root, [
-      "todayschangeperc",
-      "todayschangepercent",
-      "changepct",
-      "changepercent",
-      "pctchange",
-      "percentchange",
-    ]);
-    pricePct = fchg.value;
-  }
+  if (volume === null) volume = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]).value;
 
   if (pricePct === null && price !== null && prevC !== null && prevC > 0) {
     pricePct = ((price - prevC) / prevC) * 100;
@@ -436,7 +371,6 @@ function normalizeSnapshotAuto(ticker, snap) {
 
   const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
 
-  // Float
   let floatShares =
     n(root?.float) ??
     n(root?.freeFloat) ??
@@ -445,19 +379,11 @@ function normalizeSnapshotAuto(ticker, snap) {
     null;
 
   if (floatShares === null) {
-    const ff = findFirstNumberByKeys(root, [
-      "float",
-      "freefloat",
-      "free_float",
-      "sharesfloat",
-      "floatshares",
-      "publicfloat",
-      "public_float",
-    ]);
-    floatShares = ff.value;
+    floatShares = findFirstNumberByKeys(root, [
+      "float","freefloat","free_float","sharesfloat","floatshares","publicfloat","public_float",
+    ]).value;
   }
 
-  // Market cap
   let marketCap =
     n(root?.marketCap) ??
     n(root?.marketcap) ??
@@ -467,24 +393,16 @@ function normalizeSnapshotAuto(ticker, snap) {
     null;
 
   if (marketCap === null) {
-    const mc = findFirstNumberByKeys(root, [
-      "marketcap",
-      "mktcap",
-      "market_cap",
-      "marketcapitalization",
-      "cap",
-      "capitalization",
-    ]);
-    marketCap = mc.value;
+    marketCap = findFirstNumberByKeys(root, [
+      "marketcap","mktcap","market_cap","marketcapitalization","cap","capitalization",
+    ]).value;
   }
 
-  // Fallback estimate if missing
   const marketCapEst = marketCap === null && price !== null && floatShares !== null ? price * floatShares : null;
   const marketCapFinal = marketCap ?? marketCapEst;
 
   return {
     symbol: String(ticker || "").trim().toUpperCase(),
-
     price: price !== null ? round2(price) : null,
     pricePct: pricePct !== null ? round2(pricePct) : null,
     gapPct: gapPct !== null ? round2(gapPct) : null,
@@ -503,9 +421,6 @@ function normalizeSnapshotAuto(ticker, snap) {
 
 // ============================================================================
 // SECTION 08 — Core Signals: Demand + Vol/Float Tier Icons
-// What it is: Scanner scoring + universal daytrade signals
-// Feature: demandScore + signalIcon + Vol/Float tier icon (>=1.5x)
-// Key kỹ thuật: stable thresholds + icon only above base
 // Debug tag: SECTION08_SIGNALS_VOLFLOAT
 // ============================================================================
 function demandScore(row) {
@@ -519,16 +434,14 @@ function demandScore(row) {
   if (pc >= 10) s += 1;
   if (pc >= 20) s += 1;
 
-  // small extra boost if Pro signals exist
   if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
-
   return clamp(s, 0, 5);
 }
 function signalIcon(d) {
   if (d >= 5) return "🚀";
   if (d >= 4) return "🔥";
   if (d >= 3) return "👀";
-  return "⛔️";
+  return "⛔";
 }
 function paSignalIcon(row) {
   const above = Boolean(row?.aboveVWAP_5m);
@@ -541,9 +454,7 @@ function paSignalIcon(row) {
 
 function volFloatTier(x) {
   const v = n(x);
-  if (v === null) return { icon: "", label: null };
-  if (v < 1.5) return { icon: "", label: null };
-
+  if (v === null || v < 1.5) return { icon: "", label: null };
   if (v >= 15) return { icon: "💣💣", label: "15x+" };
   if (v >= 10) return { icon: "🚀🚀", label: "10x" };
   if (v >= 5) return { icon: "🚀", label: "5x" };
@@ -559,19 +470,11 @@ function attachVolFloat(row) {
   if (vol === null || flt === null || flt <= 0) return { ...row, volFloatX: null, volFloatIcon: "", volFloatLabel: null };
   const x = vol / flt;
   const tier = volFloatTier(x);
-  return {
-    ...row,
-    volFloatX: round2(x),
-    volFloatIcon: tier.icon,
-    volFloatLabel: tier.label,
-  };
+  return { ...row, volFloatX: round2(x), volFloatIcon: tier.icon, volFloatLabel: tier.label };
 }
 
 // ============================================================================
 // SECTION 09 — 5m Indicators Engine (SMA26 / EMA9 / EMA34 / VWAP)
-// What it is: 5m indicator pipeline (Pro toggle) + cache
-// Feature: SMA26, EMA9, EMA34, VWAP, AboveVWAP, VolSpike, PA icons
-// Key kỹ thuật: aggs fetch → chrono → compute → attach → cache
 // Debug tag: SECTION09_INDICATORS_5M
 // ============================================================================
 function computeSMA(closes, len) {
@@ -583,20 +486,15 @@ function computeSMA(closes, len) {
 function computeEMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
   const k = 2 / (len + 1);
-  // seed using SMA of first len (chronological)
   let ema = 0;
   for (let i = 0; i < len; i++) ema += closes[i];
   ema /= len;
-  for (let i = len; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-  }
+  for (let i = len; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
   return ema;
 }
 function computeVWAP(closes, volumes) {
-  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length)
-    return null;
-  let pv = 0;
-  let vv = 0;
+  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length) return null;
+  let pv = 0, vv = 0;
   for (let i = 0; i < closes.length; i++) {
     const c = n(closes[i]);
     const v = n(volumes[i]);
@@ -609,13 +507,11 @@ function computeVWAP(closes, volumes) {
 }
 function computeAvg(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return null;
-  let s = 0;
-  let c = 0;
+  let s = 0, c = 0;
   for (const x of arr) {
     const v = n(x);
     if (v === null) continue;
-    s += v;
-    c += 1;
+    s += v; c++;
   }
   if (c === 0) return null;
   return s / c;
@@ -623,26 +519,14 @@ function computeAvg(arr) {
 
 function indicatorsFromAggs5m(barsDesc) {
   if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
-    return {
-      sma26_5m: null,
-      ema9_5m: null,
-      ema34_5m: null,
-      vwap_5m: null,
-      lastVol_5m: null,
-      avgVol_5m: null,
-    };
+    return { sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
   }
-
-  // barsDesc often newest->oldest; keep only sane count
   const bars = barsDesc
-    .map((b) => ({
-      c: n(b?.c ?? b?.close),
-      v: n(b?.v ?? b?.volume),
-    }))
+    .map((b) => ({ c: n(b?.c ?? b?.close), v: n(b?.v ?? b?.volume) }))
     .filter((x) => x.c !== null)
     .slice(0, 600);
 
-  const barsChrono = [...bars].reverse(); // oldest->newest
+  const barsChrono = [...bars].reverse();
   const closes = barsChrono.map((x) => x.c);
   const vols = barsChrono.map((x) => x.v ?? 0);
 
@@ -665,13 +549,11 @@ function indicatorsFromAggs5m(barsDesc) {
   };
 }
 
-const aggsCache = new Map(); // key: SYM|5m -> { ts, bars }
-
+const aggsCache = new Map(); // SYM|5m -> {ts,bars}
 async function fetchAggs5m(ticker) {
   const sym = String(ticker || "").trim().toUpperCase();
   const cacheKey = `${sym}|5m`;
   const now = Date.now();
-
   const hit = aggsCache.get(cacheKey);
   if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
 
@@ -689,8 +571,8 @@ async function fetchAggs5m(ticker) {
   const r = await safeGet(url, { params: a.params, headers: a.headers });
   const bars = Array.isArray(r.data?.results) ? r.data.results : [];
   const ok = r.ok && bars.length > 0;
-
   if (ok) aggsCache.set(cacheKey, { ts: now, bars });
+
   return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
 }
 
@@ -702,23 +584,13 @@ function attach5mSignals(row) {
 
   const aboveVWAP = price !== null && vwap !== null ? price > vwap : false;
   const volSpike = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol >= avgVol * VOL_SPIKE_MULT : false;
-
   const rvol = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol / avgVol : null;
 
-  return {
-    ...row,
-    aboveVWAP_5m: aboveVWAP,
-    volSpike_5m: volSpike,
-    rvol_5m: rvol !== null ? round2(rvol) : null,
-    paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }),
-  };
+  return { ...row, aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike, rvol_5m: rvol !== null ? round2(rvol) : null, paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }) };
 }
 
 // ============================================================================
 // SECTION 10 — Session Engine (Pre/RTH/After) + Ext%
-// What it is: Determine session (NY time) + compute Ext%
-// Feature: pre/rth/after filter, extPct
-// Key kỹ thuật: timestamp normalize + Intl TZ
 // Debug tag: SECTION10_SESSION_EXTENDED
 // ============================================================================
 function toMs(ts) {
@@ -732,12 +604,7 @@ function toMs(ts) {
 function nyHM(ms) {
   try {
     const d = new Date(ms);
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).formatToParts(d);
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d);
     const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
     const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
     return { h, m };
@@ -766,9 +633,6 @@ function addExtPct(row, rawSnap) {
 
 // ============================================================================
 // SECTION 11 — HALT / RESUME WebSocket (LULD) Module
-// What it is: Track HALT/RESUME real-time & attach flags
-// Feature: haltedMap + /halts endpoint + attachHaltFlag
-// Key kỹ thuật: ws subscribe LULD.*; indicator 17/18; reconnect loop
 // Debug tag: SECTION11_HALT_WS
 // ============================================================================
 let WebSocketLib = null;
@@ -780,15 +644,10 @@ try {
 }
 
 const haltedMap = new Map(); // symbol -> { halted, lastEvent, tsMs, reason }
-function nowMs() {
-  return Date.now();
-}
-function setHalt(sym) {
-  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: nowMs(), reason: "LULD" });
-}
-function setResume(sym) {
-  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: nowMs(), reason: "LULD" });
-}
+function nowMs() { return Date.now(); }
+function setHalt(sym) { haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: nowMs(), reason: "LULD" }); }
+function setResume(sym) { haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: nowMs(), reason: "LULD" }); }
+
 function handleWsPayload(payload) {
   const msgs = Array.isArray(payload) ? payload : [payload];
   for (const m of msgs) {
@@ -809,7 +668,7 @@ let wsInstance = null;
 function startHaltWebSocket() {
   if (!ENABLE_HALT_WS) return;
   if (!WebSocketLib) {
-    console.log("⚠️ HALT WS disabled: package 'ws' not installed. Run: npm i ws");
+    console.log("⚠️ HALT WS disabled: install ws -> npm i ws");
     return;
   }
   if (!MASSIVE_API_KEY) {
@@ -817,9 +676,7 @@ function startHaltWebSocket() {
     return;
   }
 
-  try {
-    if (wsInstance && wsInstance.readyState === 1) return;
-  } catch {}
+  try { if (wsInstance && wsInstance.readyState === 1) return; } catch {}
 
   const ws = new WebSocketLib(MASSIVE_WS_URL);
   wsInstance = ws;
@@ -835,12 +692,7 @@ function startHaltWebSocket() {
   });
 
   ws.on("message", (buf) => {
-    try {
-      const parsed = JSON.parse(buf.toString("utf8"));
-      handleWsPayload(parsed);
-    } catch {
-      // ignore
-    }
+    try { handleWsPayload(JSON.parse(buf.toString("utf8"))); } catch {}
   });
 
   ws.on("close", () => {
@@ -870,7 +722,7 @@ function attachHaltFlag(row) {
 }
 
 app.get("/halts", (req, res) => {
-  const only = String(req.query.only || "halted").toLowerCase(); // halted|all
+  const only = String(req.query.only || "halted").toLowerCase();
   const out = [];
   for (const [symbol, v] of haltedMap.entries()) {
     if (only === "halted" && !v.halted) continue;
@@ -882,9 +734,6 @@ app.get("/halts", (req, res) => {
 
 // ============================================================================
 // SECTION 12 — Smart Filters (Server-side)
-// What it is: Advanced filters from UI (min/max price/vol/rvol/cap/float)
-// Feature: applySmartFilters(rows, query)
-// Key kỹ thuật: safe numeric parsing + null handling
 // Debug tag: SECTION12_SMART_FILTERS
 // ============================================================================
 function toNumQ(v) {
@@ -896,10 +745,8 @@ function applySmartFilters(rows, q) {
   const maxPrice = toNumQ(q.maxPrice);
   const minVol = toNumQ(q.minVol);
   const minRVOL = toNumQ(q.minRVOL);
-
   const minCapB = toNumQ(q.minCapB);
   const maxCapB = toNumQ(q.maxCapB);
-
   const minFloatM = toNumQ(q.minFloatM);
   const maxFloatM = toNumQ(q.maxFloatM);
 
@@ -912,13 +759,10 @@ function applySmartFilters(rows, q) {
 
     if (minPrice !== null && (price === null || price < minPrice)) return false;
     if (maxPrice !== null && (price === null || price > maxPrice)) return false;
-
     if (minVol !== null && (vol === null || vol < minVol)) return false;
     if (minRVOL !== null && (rvol === null || rvol < minRVOL)) return false;
-
     if (minCapB !== null && (capB === null || capB < minCapB)) return false;
     if (maxCapB !== null && (capB === null || capB > maxCapB)) return false;
-
     if (minFloatM !== null && (floatM === null || floatM < minFloatM)) return false;
     if (maxFloatM !== null && (floatM === null || floatM > maxFloatM)) return false;
 
@@ -927,19 +771,16 @@ function applySmartFilters(rows, q) {
 }
 
 // ============================================================================
-// SECTION 13 — Group Router: Build Rows By Group
-// What it is: Core engine "Group = source + filters + sort"
-// Feature: unified builder for list/sessions
-// Key kỹ thuật: keep daytrade light; pro can be heavier
+// SECTION 13 — Group Router + Builders
 // Debug tag: SECTION13_GROUP_ROUTER
 // ============================================================================
-function envMissing() {
+function envMissingFor({ needAggs = false, needSnapshotAll = false } = {}) {
   const miss = [];
   if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
   if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
   if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
-  if (!MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
-  if (!MASSIVE_SNAPSHOT_ALL_URL) miss.push("MASSIVE_SNAPSHOT_ALL_URL");
+  if (needAggs && !MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
+  if (needSnapshotAll && !MASSIVE_SNAPSHOT_ALL_URL) miss.push("MASSIVE_SNAPSHOT_ALL_URL");
   return miss;
 }
 
@@ -950,17 +791,17 @@ function capPass(row, cap) {
   return row.cap === c;
 }
 
+function groupToDirection(group) {
+  if (group === "topLosers") return "losers";
+  return "gainers";
+}
+
 function sortRowsByGroup(rows, group) {
   if (group === "topGappers") {
     rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
     return;
   }
   rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
-}
-
-function groupToDirection(group) {
-  if (group === "topLosers") return "losers";
-  return "gainers";
 }
 
 function shouldEnableIndicators(mode) {
@@ -974,15 +815,7 @@ async function attachIndicatorsIfEnabled(rows, mode, errorsOut) {
     const a = await fetchAggs5m(r.symbol);
     if (!a.ok) {
       errorsOut.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
-      return {
-        symbol: r.symbol,
-        sma26_5m: null,
-        ema9_5m: null,
-        ema34_5m: null,
-        vwap_5m: null,
-        lastVol_5m: null,
-        avgVol_5m: null,
-      };
+      return { symbol: r.symbol, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
     }
     return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
   });
@@ -994,25 +827,19 @@ async function attachIndicatorsIfEnabled(rows, mode, errorsOut) {
 }
 
 function finalizeRows(rows, mode) {
-  // attach vol/float, score, icons
   let out = rows.map(attachVolFloat);
   out = out.map((r) => {
     const d = demandScore(r);
     return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
   });
-
-  // HALT only meaningful for pro (but safe either way)
   if (mode === "pro") out = out.map(attachHaltFlag);
-
   return out;
 }
 
 async function buildRowsFromMovers({ group, cap, limit, minGap, mode, query }) {
   const direction = groupToDirection(group);
   const movers = await fetchMovers(direction);
-  if (!movers.ok) {
-    return { ok: false, status: 500, body: { ok: false, error: "Movers failed", moverDebug: movers } };
-  }
+  if (!movers.ok) return { ok: false, status: 500, body: { ok: false, error: "Movers failed", moverDebug: movers } };
 
   const lim = clamp(Number(limit || 50), 5, 200);
 
@@ -1037,17 +864,12 @@ async function buildRowsFromMovers({ group, cap, limit, minGap, mode, query }) {
     if (mg !== null && Number.isFinite(mg)) rows = rows.filter((r) => (r.gapPct ?? 0) >= mg);
   }
 
-  // indicators (optional by mode)
   const aggsErrors = [];
   rows = await attachIndicatorsIfEnabled(rows, mode, aggsErrors);
 
-  // smart filters (server-side)
   rows = applySmartFilters(rows, query || {});
-
-  // finalize scoring + vol/float + icons + halt
   rows = finalizeRows(rows, mode);
 
-  // sort
   sortRowsByGroup(rows, group);
 
   return {
@@ -1060,9 +882,7 @@ async function buildRowsFromMovers({ group, cap, limit, minGap, mode, query }) {
       cap,
       limitRequested: lim,
       results: rows,
-      snapshotErrors: DEBUG
-        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
-        : undefined,
+      snapshotErrors: DEBUG ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail })) : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     },
   };
@@ -1070,32 +890,23 @@ async function buildRowsFromMovers({ group, cap, limit, minGap, mode, query }) {
 
 async function buildRowsFromSnapshotAll({ cap, limit, session, mode, query }) {
   if (!ENABLE_SNAPSHOT_ALL && (session || String(query?.group || "") === "snapshotAll")) {
-    return {
-      ok: false,
-      status: 403,
-      body: { ok: false, error: "Snapshot-All is disabled", hint: "Set ENABLE_SNAPSHOT_ALL=true to enable." },
-    };
+    return { ok: false, status: 403, body: { ok: false, error: "Snapshot-All is disabled", hint: "Set ENABLE_SNAPSHOT_ALL=true to enable." } };
   }
 
   const snap = await fetchSnapshotAll();
-  if (!snap.ok) {
-    return { ok: false, status: 500, body: { ok: false, error: "Snapshot-all failed", debug: snap } };
-  }
+  if (!snap.ok) return { ok: false, status: 500, body: { ok: false, error: "Snapshot-all failed", debug: snap } };
 
-  // map ticker -> raw snapshot
   const snapMap = new Map();
   for (const x of snap.rows) {
     const t = String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase();
     if (t) snapMap.set(t, x);
   }
 
-  // build rows
   let rows = [];
   for (const [ticker, rawSnap] of snapMap.entries()) {
     rows.push(addExtPct(normalizeSnapshotAuto(ticker, rawSnap), rawSnap));
   }
 
-  // session filter (pre/after)
   if (session) {
     rows = rows.filter((r) => {
       const raw = snapMap.get(r.symbol);
@@ -1107,17 +918,12 @@ async function buildRowsFromSnapshotAll({ cap, limit, session, mode, query }) {
 
   rows = rows.filter((r) => capPass(r, cap));
 
-  // indicators (pro-only recommended)
   const aggsErrors = [];
   rows = await attachIndicatorsIfEnabled(rows, mode, aggsErrors);
 
-  // smart filters
   rows = applySmartFilters(rows, query || {});
-
-  // finalize
   rows = finalizeRows(rows, mode);
 
-  // sort for session scan: extPct then pricePct then volume
   rows.sort(
     (a, b) =>
       Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
@@ -1128,30 +934,14 @@ async function buildRowsFromSnapshotAll({ cap, limit, session, mode, query }) {
   const lim = clamp(Number(limit || 100), 5, 500);
   rows = rows.slice(0, lim);
 
-  return {
-    ok: true,
-    status: 200,
-    body: {
-      ok: true,
-      mode,
-      session: session || null,
-      cap,
-      results: rows,
-      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
-    },
-  };
+  return { ok: true, status: 200, body: { ok: true, mode, session: session || null, cap, results: rows, aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined } };
 }
 
 // ============================================================================
-// SECTION 14 — UI Renderer (HTML/CSS/JS)
-// What it is: Full UI (tabs + controls + table + modal)
-// Feature: alerts, auto refresh, filters, halt/resume styling, click chart
-// Key kỹ thuật: fetch endpoints; render table; TradingView modal
+// SECTION 14 — UI Renderer (HTML/CSS/JS) + TradingView Chart Modal
 // Debug tag: SECTION14_UI_RENDER
 // ============================================================================
-function disclaimerContent(mode) {
-  const isPro = mode === "pro";
-
+function disclaimerContent(platformMode) {
   const simpleTitle = `⚠️ ${BRAND.name} Disclaimer`;
   const proTitle = `⚠️ Risk Disclosure & No Investment Advice`;
 
@@ -1161,14 +951,12 @@ function disclaimerContent(mode) {
     `Day trading rủi ro cao — bạn tự chịu trách nhiệm với mọi quyết định.`,
     `Luôn kiểm tra lại trên chart/broker trước khi vào lệnh.`,
   ];
-
   const simpleEN = [
     `${BRAND.name} is a market scanner for reference only — not financial advice.`,
     `Data may be delayed, incomplete, or inaccurate due to third-party feeds.`,
     `Day trading is high risk. You are responsible for your trades.`,
     `Always confirm on your chart/broker before entering a position.`,
   ];
-
   const proVN = [
     `${BRAND.name} cung cấp dữ liệu thị trường và phân tích kỹ thuật cho mục đích tham khảo/giáo dục.`,
     `Nội dung hiển thị không cấu thành tư vấn đầu tư hay khuyến nghị mua/bán.`,
@@ -1176,7 +964,6 @@ function disclaimerContent(mode) {
     `Giao dịch có rủi ro cao và có thể mất toàn bộ vốn.`,
     `Bạn chịu trách nhiệm hoàn toàn cho mọi quyết định và rủi ro phát sinh.`,
   ];
-
   const proEN = [
     `${BRAND.name} provides market data and technical signals for informational/educational purposes only.`,
     `Nothing presented constitutes investment advice or a solicitation to buy/sell securities.`,
@@ -1188,10 +975,7 @@ function disclaimerContent(mode) {
   const title = DISCLAIMER_MODE === "pro" ? proTitle : simpleTitle;
   const bullets = DISCLAIMER_MODE === "pro" ? { vn: proVN, en: proEN } : { vn: simpleVN, en: simpleEN };
 
-  // If page is in pro-mode, we can choose professional tone automatically if desired
-  const finalTitle = isPro && DISCLAIMER_MODE === "pro" ? proTitle : title;
-
-  return { title: finalTitle, bullets };
+  return { title, bullets };
 }
 
 function renderUI(preset = {}) {
@@ -1201,8 +985,8 @@ function renderUI(preset = {}) {
   const presetMinGap = preset.minGap ?? "";
   const presetSymbols = preset.symbols ?? "NVDA,TSLA,AAPL";
   const presetMode = preset.mode || "daytrade"; // daytrade|pro
-  const active = (path) => (preset.path === path ? "opacity:1" : "opacity:.65");
 
+  const active = (path) => (preset.path === path ? "opacity:1" : "opacity:.65");
   const disc = disclaimerContent(presetMode);
 
   return `<!doctype html>
@@ -1217,7 +1001,6 @@ function renderUI(preset = {}) {
     header { padding:16px 18px; border-bottom:1px solid rgba(255,255,255,.08); position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: blur(10px); z-index:20; }
     .wrap { max-width:1400px; margin:0 auto; }
 
-    /* Brand */
     .brandRow{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
     .brandLeft{ display:flex; flex-direction:column; gap:4px; }
     .brandTitle{ display:flex; align-items:center; gap:10px; }
@@ -1257,11 +1040,9 @@ function renderUI(preset = {}) {
     .symLink { color:#e6e8ef; text-decoration:none; border-bottom:1px dashed rgba(255,255,255,.25); cursor:pointer; }
     .symLink:hover { border-bottom-color: rgba(255,255,255,.55); }
 
-    /* HALT UI */
     tr.haltRow td { background: rgba(255, 80, 80, .10) !important; }
     tr.resumeFlash td { background: rgba(80, 255, 140, .12) !important; }
 
-    /* Modal */
     .modalBack { position:fixed; inset:0; background: rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:50; }
     .modal { width:min(1100px, 94vw); height:min(720px, 88vh); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; overflow:hidden; box-shadow: 0 18px 70px rgba(0,0,0,.55); }
     .modalTop { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:10px 12px; background:#121622; border-bottom:1px solid rgba(255,255,255,.10); }
@@ -1271,7 +1052,6 @@ function renderUI(preset = {}) {
     .modalClose:hover { border-color: rgba(255,255,255,.28); }
     .chartBox { width:100%; height: calc(100% - 52px); }
 
-    /* Disclaimer Popup */
     .discBack{ position:fixed; inset:0; background: rgba(0,0,0,.68); display:none; align-items:center; justify-content:center; z-index:80; }
     .disc{ width:min(720px, 92vw); background:#0b0d12; border:1px solid rgba(255,255,255,.16); border-radius:16px; box-shadow: 0 18px 70px rgba(0,0,0,.60); overflow:hidden; }
     .discTop{ padding:12px 14px; background:#121622; border-bottom:1px solid rgba(255,255,255,.10); display:flex; align-items:center; justify-content:space-between; gap:10px;}
@@ -1287,35 +1067,7 @@ function renderUI(preset = {}) {
     @keyframes fadeOut { to { opacity: 0; transform: translateY(2px); } }
   </style>
 </head>
-<body><!-- Chart Modal -->
-<div class="modalBack" id="modalBack" aria-hidden="true">
-  <div class="modal" role="dialog" aria-modal="true">
-    <div class="modalTop">
-      <div class="modalTitle" id="modalTitle">ALGTP™ Chart</div>
-      <div class="modalTools">
-        <select id="exSel">
-          <option value="NASDAQ">NASDAQ</option>
-          <option value="NYSE">NYSE</option>
-          <option value="AMEX">AMEX</option>
-        </select>
-        <select id="tfSel">
-          <option value="1">1m</option>
-          <option value="5" selected>5m</option>
-          <option value="15">15m</option>
-          <option value="60">1h</option>
-          <option value="240">4h</option>
-          <option value="D">1D</option>
-          <option value="W">1W</option>
-        </select>
-        <button class="modalClose" id="closeBtn">Close</button>
-      </div>
-    </div>
-    <div class="chartBox" id="chartBox"></div>
-  </div>
-</div>
-
-<script src="https://s3.tradingview.com/tv.js"></script>
-
+<body>
 <header>
   <div class="wrap">
     <div class="brandRow">
@@ -1423,7 +1175,7 @@ function renderUI(preset = {}) {
     </div>
 
     <div class="hint">
-      ⛔ HALT row = red • 🟢 RESUME = green flash (best-effort). Vol/Float icons show only when &ge; 1.5x.
+      ⛔ HALT row = red • 🟢 RESUME = green flash (best-effort). Vol/Float icons show only when ≥ 1.5x.
       <br/>Indicators: SMA26 / EMA9 / EMA34 / VWAP are enabled by mode (Daytrade/Pro toggles via ENV).
       <br/>Click ticker: modal chart (default) or enable "Open new window" (or Ctrl/Cmd+Click).
     </div>
@@ -1505,16 +1257,6 @@ const errBox = byId("errBox");
 const statusBadge = byId("statusBadge");
 const countdownBadge = byId("countdownBadge");
 
-// ===== RESUME flash memory =====
-const resumeFlash = new Map(); // symbol -> expiresAt(ms)
-function nowMs(){ return Date.now(); }
-function shouldFlash(sym){
-  const exp = resumeFlash.get(sym);
-  if (!exp) return false;
-  if (nowMs() > exp){ resumeFlash.delete(sym); return false; }
-  return true;
-}
-
 function setStatus(t){ statusBadge.textContent = t; }
 function showError(obj){
   errBox.style.display = "block";
@@ -1533,6 +1275,16 @@ function fmtInt(x){
   const nn = Number(x);
   if (!Number.isFinite(nn)) return "-";
   return Math.round(nn).toLocaleString();
+}
+
+// ===== RESUME flash memory =====
+const resumeFlash = new Map();
+function nowMs(){ return Date.now(); }
+function shouldFlash(sym){
+  const exp = resumeFlash.get(sym);
+  if (!exp) return false;
+  if (nowMs() > exp){ resumeFlash.delete(sym); return false; }
+  return true;
 }
 
 // ===== Smart Filters params (client -> server) =====
@@ -1584,7 +1336,6 @@ function presetHalt(){
   byId("fMinFloatM").value = "";
   byId("fMaxFloatM").value = "";
 }
-
 byId("presetMomentum").addEventListener("click", ()=>{ presetMomentum(); run(); });
 byId("presetPremarket").addEventListener("click", ()=>{ presetPremarket(); run(); });
 byId("presetHalt").addEventListener("click", ()=>{ presetHalt(); run(); });
@@ -1657,19 +1408,19 @@ function shouldAlertRow(r, cfg){
 function fireAlert(r, cfg){
   alerted.add(r.symbol);
   const parts = [];
-  if (r.pricePct != null) parts.push(\`Price%: \${r.pricePct}%\`);
-  if (r.extPct != null) parts.push(\`Ext%: \${r.extPct}%\`);
-  if (r.gapPct != null) parts.push(\`Gap%: \${r.gapPct}%\`);
-  if (r.volFloatX != null && r.volFloatX >= 1.5) parts.push(\`Vol/Float: \${r.volFloatIcon || ""} \${r.volFloatX}x\`);
-  if (r.rvol_5m != null) parts.push(\`RVOL(5m): \${r.rvol_5m}\`);
-  if (r.floatM != null) parts.push(\`Float(M): \${r.floatM}\`);
-  if (r.marketCapB != null) parts.push(\`MCap(B): \${r.marketCapB}\`);
-  if (r.aboveVWAP_5m) parts.push(\`Price>VWAP ✅\`);
-  if (r.volSpike_5m) parts.push(\`VolSpike 🔊\`);
+  if (r.pricePct != null) parts.push("Price%: " + r.pricePct + "%");
+  if (r.extPct != null) parts.push("Ext%: " + r.extPct + "%");
+  if (r.gapPct != null) parts.push("Gap%: " + r.gapPct + "%");
+  if (r.volFloatX != null && r.volFloatX >= 1.5) parts.push("Vol/Float: " + (r.volFloatIcon||"") + " " + r.volFloatX + "x");
+  if (r.rvol_5m != null) parts.push("RVOL(5m): " + r.rvol_5m);
+  if (r.floatM != null) parts.push("Float(M): " + r.floatM);
+  if (r.marketCapB != null) parts.push("MCap(B): " + r.marketCapB);
+  if (r.aboveVWAP_5m) parts.push("Price>VWAP ✅");
+  if (r.volSpike_5m) parts.push("VolSpike 🔊");
 
   const body = parts.join(" | ") || "Signal";
   if (cfg.soundOn) beep();
-  if (cfg.desktopOn) pushNotification(\`${"${BRAND.mark}"} ${"${BRAND.name}"} | \${r.haltIcon || ""}\${r.signalIcon || ""} \${r.symbol}\`, body);
+  if (cfg.desktopOn) pushNotification("${BRAND.mark} ${BRAND.name} | " + (r.haltIcon||"") + (r.signalIcon||"") + " " + r.symbol, body);
 }
 function runAlerts(data){
   const cfg = getAlertCfg();
@@ -1685,7 +1436,7 @@ async function enableNotifications(){
   }
   const p = await Notification.requestPermission();
   if (p === "granted") {
-    try { new Notification(\`${"${BRAND.mark}"} ${"${BRAND.name}"} Alerts enabled\`, { body: "Desktop notifications are ON." }); } catch(e){}
+    try { new Notification("${BRAND.mark} ${BRAND.name} Alerts enabled", { body: "Desktop notifications are ON." }); } catch(e){}
   } else {
     alert("Notification permission not granted.");
   }
@@ -1726,27 +1477,22 @@ function renderChart(sym){
   chartBox.innerHTML = '<div id="tv_chart" style="width:100%;height:100%;"></div>';
   const tvSymbol = buildTvSymbol(sym);
   const interval = tfSel.value || "5";
-
-  try{
-    new TradingView.widget({
-      autosize: true,
-      symbol: tvSymbol,
-      interval: interval,
-      timezone: "America/New_York",
-      theme: "dark",
-      style: "1",
-      locale: "en",
-      enable_publishing: false,
-      allow_symbol_change: true,
-      container_id: "tv_chart"
-    });
-  }catch(e){
-    alert(String(e?.message || e));
-  }
+  new TradingView.widget({
+    autosize: true,
+    symbol: tvSymbol,
+    interval: interval,
+    timezone: "America/New_York",
+    theme: "dark",
+    style: "1",
+    locale: "en",
+    enable_publishing: false,
+    allow_symbol_change: true,
+    container_id: "tv_chart"
+  });
 }
 function openChart(sym){
   currentSymbol = sym;
-  modalTitle.textContent = \`${"${BRAND.mark}"} ${"${BRAND.name}"} Chart — \` + sym;
+  modalTitle.textContent = "${BRAND.mark} ${BRAND.name} Chart — " + sym;
   openModal();
   renderChart(sym);
 }
@@ -1761,12 +1507,10 @@ window.handleTickerClick = function(ev, sym){
     return;
   }
   openChart(sym);
-}
-
+};
 byId("closeBtn").addEventListener("click", closeModal);
 modalBack.addEventListener("click", (e)=>{ if (e.target === modalBack) closeModal(); });
 document.addEventListener("keydown", (e)=>{ if (e.key === "Escape") closeModal(); });
-
 exSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
 tfSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
 
@@ -1782,14 +1526,14 @@ function renderList(data){
   }
 
   const titleRight = data.mode === "symbols"
-    ? \`Symbols • \${rows.length} rows\`
-    : \`\${data.group || data.session || "scan"} • cap=\${data.cap || "all"} • \${rows.length} rows\`;
+    ? "Symbols • " + rows.length + " rows"
+    : (data.group || data.session || "scan") + " • cap=" + (data.cap || "all") + " • " + rows.length + " rows";
 
-  out.innerHTML = \`
+  out.innerHTML = `
     <div class="card">
       <div class="cardHead">
-        <div class="title">${BRAND.mark} \${data.mode === "symbols" ? "Scan Symbols" : "Scan Group"} — ${BRAND.name}</div>
-        <div class="meta">\${titleRight}</div>
+        <div class="title">${BRAND.mark} ${(data.mode === "symbols" ? "Scan Symbols" : "Scan Group")} — ${BRAND.name}</div>
+        <div class="meta">${titleRight}</div>
       </div>
       <div style="overflow:auto;">
       <table>
@@ -1817,50 +1561,45 @@ function renderList(data){
           </tr>
         </thead>
         <tbody>
-          \${rows.map(r => {
+          ${rows.map(r => {
             const sym = String(r.symbol||"");
             const safeSym = sym.replace(/'/g,"");
             const isHalt = Boolean(r.halted);
             const flash = shouldFlash(sym);
             const rowClass = isHalt ? "haltRow" : (flash ? "resumeFlash" : "");
-            const tip = isHalt
-              ? \`HALT – \${r.haltReason || "LULD"}\`
-              : (flash ? \`RESUME – \${r.haltReason || "LULD"}\` : "");
+            const tip = isHalt ? ("HALT – " + (r.haltReason || "LULD")) : (flash ? ("RESUME – " + (r.haltReason || "LULD")) : "");
+            const vf = (r.volFloatX != null && Number(r.volFloatX) >= 1.5) ? ((r.volFloatIcon || "") + " " + fmtNum(r.volFloatX,2) + "x") : "-";
 
-            const vf = (r.volFloatX != null && Number(r.volFloatX) >= 1.5)
-              ? \`\${r.volFloatIcon || ""} \${fmtNum(r.volFloatX,2)}x\`
-              : "-";
-
-            return \`
-              <tr class="\${rowClass}" title="\${tip}">
-                <td>\${r.haltIcon || ""}\${r.signalIcon || ""}</td>
-                <td>\${r.paIcon || ""}</td>
+            return `
+              <tr class="${rowClass}" title="${tip}">
+                <td>${(r.haltIcon || "") + (r.signalIcon || "")}</td>
+                <td>${r.paIcon || ""}</td>
                 <td class="mono">
-                  <a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'\${safeSym}')">\${r.symbol || ""}</a>
+                  <a class="symLink" href="javascript:void(0)" onclick="handleTickerClick(event,'${safeSym}')">${r.symbol || ""}</a>
                 </td>
-                <td class="right mono">\${fmtNum(r.price)}</td>
-                <td class="right mono">\${fmtNum(r.pricePct)}%</td>
-                <td class="right mono">\${fmtNum(r.extPct)}%</td>
-                <td class="right mono">\${fmtNum(r.gapPct)}%</td>
-                <td class="right mono">\${fmtInt(r.volume)}</td>
-                <td class="right mono">\${vf}</td>
-                <td class="right mono">\${fmtNum(r.rvol_5m,2)}</td>
-                <td class="right mono">\${fmtNum(r.floatM)}</td>
-                <td>\${r.floatCat || "-"}</td>
-                <td class="right mono">\${fmtNum(r.marketCapB)}</td>
-                <td>\${r.cap || "-"}</td>
-                <td class="right mono">\${r.demandScore ?? "-"}</td>
-                <td class="right mono">\${fmtNum(r.sma26_5m)}</td>
-                <td class="right mono">\${fmtNum(r.ema9_5m)}</td>
-                <td class="right mono">\${fmtNum(r.ema34_5m)}</td>
-                <td class="right mono">\${fmtNum(r.vwap_5m)}</td>
-              </tr>\`;
+                <td class="right mono">${fmtNum(r.price)}</td>
+                <td class="right mono">${fmtNum(r.pricePct)}%</td>
+                <td class="right mono">${fmtNum(r.extPct)}%</td>
+                <td class="right mono">${fmtNum(r.gapPct)}%</td>
+                <td class="right mono">${fmtInt(r.volume)}</td>
+                <td class="right mono">${vf}</td>
+                <td class="right mono">${fmtNum(r.rvol_5m,2)}</td>
+                <td class="right mono">${fmtNum(r.floatM)}</td>
+                <td>${r.floatCat || "-"}</td>
+                <td class="right mono">${fmtNum(r.marketCapB)}</td>
+                <td>${r.cap || "-"}</td>
+                <td class="right mono">${r.demandScore ?? "-"}</td>
+                <td class="right mono">${fmtNum(r.sma26_5m)}</td>
+                <td class="right mono">${fmtNum(r.ema9_5m)}</td>
+                <td class="right mono">${fmtNum(r.ema34_5m)}</td>
+                <td class="right mono">${fmtNum(r.vwap_5m)}</td>
+              </tr>`;
           }).join("")}
         </tbody>
       </table>
       </div>
     </div>
-  \`;
+  `;
 }
 
 // -------- Auto Refresh --------
@@ -1883,12 +1622,12 @@ function startAuto(seconds){
   byId("autoOn").checked = true;
 
   countdown = seconds;
-  countdownBadge.textContent = \`Next refresh in \${countdown}s\`;
+  countdownBadge.textContent = "Next refresh in " + countdown + "s";
 
   countdownTimer = setInterval(()=>{
     countdown -= 1;
     if (countdown <= 0) countdown = seconds;
-    countdownBadge.textContent = \`Next refresh in \${countdown}s\`;
+    countdownBadge.textContent = "Next refresh in " + countdown + "s";
   }, 1000);
 
   autoTimer = setInterval(()=>{ run(); }, seconds * 1000);
@@ -1913,19 +1652,19 @@ async function run(){
 
   if (mode === "symbols"){
     const symbols = byId("symbols").value.trim() || "NVDA,TSLA,AAPL";
-    url = \`/scan?symbols=\${encodeURIComponent(symbols)}\`;
+    url = "/scan?symbols=" + encodeURIComponent(symbols);
   } else {
     const group = byId("group").value;
     const cap = byId("cap").value;
     const limit = byId("limit").value;
     const minGap = byId("minGap").value.trim();
 
-    if (group === "premarket") url = \`/premarket?cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
-    else if (group === "aftermarket") url = \`/aftermarket?cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
-    else if (group === "snapshotAll") url = \`/snapshot-all?cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
+    if (group === "premarket") url = "/premarket?cap=" + encodeURIComponent(cap) + "&limit=" + encodeURIComponent(limit);
+    else if (group === "aftermarket") url = "/aftermarket?cap=" + encodeURIComponent(cap) + "&limit=" + encodeURIComponent(limit);
+    else if (group === "snapshotAll") url = "/snapshot-all?cap=" + encodeURIComponent(cap) + "&limit=" + encodeURIComponent(limit);
     else {
-      url = \`/list?group=\${encodeURIComponent(group)}&cap=\${encodeURIComponent(cap)}&limit=\${encodeURIComponent(limit)}\`;
-      if (minGap) url += \`&minGap=\${encodeURIComponent(minGap)}\`;
+      url = "/list?group=" + encodeURIComponent(group) + "&cap=" + encodeURIComponent(cap) + "&limit=" + encodeURIComponent(limit);
+      if (minGap) url += "&minGap=" + encodeURIComponent(minGap);
     }
   }
 
@@ -1939,7 +1678,7 @@ async function run(){
       showError(data);
       return;
     }
-    setStatus(\`OK (\${data.results.length} rows)\`);
+    setStatus("OK (" + data.results.length + " rows)");
     renderList(data);
     runAlerts(data);
 
@@ -1966,7 +1705,6 @@ function setPreset(){
 
   byId("autoSec").value = "30";
   countdownBadge.textContent = "-";
-
   byId("modePill").textContent = PRESET.platformMode || "daytrade";
 }
 
@@ -1983,9 +1721,6 @@ run();
 
 // =====================================================================
 // SECTION 15 — Disclaimer Popup (5s) + UX Guards
-// What it is: Auto show disclaimer, auto close after 5s, don't show again
-// Feature: localStorage TTL + manual close
-// Key kỹ thuật: fade out + TTL days
 // Debug tag: SECTION15_DISCLAIMER_POPUP
 // =====================================================================
 const discBack = byId("discBack");
@@ -1996,16 +1731,14 @@ const DISC_KEY = "algtp_disclaimer_until";
 function showDisclaimer(){
   try{
     const until = Number(localStorage.getItem(DISC_KEY) || "0");
-    if (Number.isFinite(until) && until > Date.now()) return; // still valid
+    if (Number.isFinite(until) && until > Date.now()) return;
   }catch(e){}
 
   discBack.style.display = "flex";
   discBack.setAttribute("aria-hidden","false");
-
-  // auto close
   setTimeout(()=>{ closeDisclaimer(true); }, ${DISCLAIMER_AUTO_CLOSE_MS});
 }
-function closeDisclaimer(fromAuto){
+function closeDisclaimer(){
   if (!discBack || discBack.style.display === "none") return;
 
   try{
@@ -2029,102 +1762,17 @@ function closeDisclaimer(fromAuto){
     discBack.setAttribute("aria-hidden","true");
   }
 }
-
-discCloseBtn.addEventListener("click", ()=>closeDisclaimer(false));
-discBack.addEventListener("click", (e)=>{ if (e.target === discBack) closeDisclaimer(false); });
+discCloseBtn.addEventListener("click", closeDisclaimer);
+discBack.addEventListener("click", (e)=>{ if (e.target === discBack) closeDisclaimer(); });
 
 showDisclaimer();
-</script> // -------- Chart Modal / New Window --------
-const modalBack = byId("modalBack");
-const modalTitle = byId("modalTitle");
-const chartBox = byId("chartBox");
-const exSel = byId("exSel");
-const tfSel = byId("tfSel");
-let currentSymbol = null;
-
-function openModal(){
-  modalBack.style.display = "flex";
-  modalBack.setAttribute("aria-hidden", "false");
-}
-function closeModal(){
-  modalBack.style.display = "none";
-  modalBack.setAttribute("aria-hidden", "true");
-  chartBox.innerHTML = "";
-  currentSymbol = null;
-}
-
-function buildTvSymbol(sym){
-  const ex = exSel.value || "NASDAQ";
-  return ex + ":" + sym;
-}
-
-function tvUrlFor(sym){
-  const tvSymbol = buildTvSymbol(sym);
-  const interval = tfSel.value || "5";
-  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol) +
-         "&interval=" + encodeURIComponent(interval);
-}
-
-function renderChart(sym){
-  if (!window.TradingView || !window.TradingView.widget){
-    alert("TradingView library failed to load.");
-    return;
-  }
-  chartBox.innerHTML = '<div id="tv_chart" style="width:100%;height:100%;"></div>';
-  const tvSymbol = buildTvSymbol(sym);
-  const interval = tfSel.value || "5";
-
-  new TradingView.widget({
-    autosize: true,
-    symbol: tvSymbol,
-    interval: interval,
-    timezone: "America/New_York",
-    theme: "dark",
-    style: "1",
-    locale: "en",
-    enable_publishing: false,
-    allow_symbol_change: true,
-    container_id: "tv_chart"
-  });
-}
-
-function openChart(sym){
-  currentSymbol = sym;
-  modalTitle.textContent = "ALGTP™ Chart — " + sym;
-  openModal();
-  renderChart(sym);
-}
-
-// Click handler: normal click = modal, Ctrl/Cmd = new tab (optional checkbox)
-window.handleTickerClick = function(ev, sym){
-  const forceNew = byId("openNewWin")?.checked; // nếu bạn có checkbox này
-  const modifier = ev && (ev.ctrlKey || ev.metaKey);
-  if (forceNew || modifier){
-    const url = tvUrlFor(sym);
-    const newTab = byId("openNewTab")?.checked !== false; // nếu có checkbox new tab
-    if (newTab) window.open(url, "_blank", "noopener,noreferrer");
-    else window.location.href = url;
-    return;
-  }
-  openChart(sym);
-};
-
-byId("closeBtn").addEventListener("click", closeModal);
-modalBack.addEventListener("click", (e)=>{ if (e.target === modalBack) closeModal(); });
-document.addEventListener("keydown", (e)=>{ if (e.key === "Escape") closeModal(); });
-
-exSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
-tfSel.addEventListener("change", ()=>{ if (currentSymbol) renderChart(currentSymbol); });
-
+</script>
 </body>
 </html>`;
 }
 
 // ============================================================================
 // SECTION 16 — UI Routes (Pages)
-// What it is: Map tabs/pages to presets
-// Feature: /ui + daytrade pages + pro pages
-// Key kỹ thuật: preset injection
 // Debug tag: SECTION16_UI_ROUTES
 // ============================================================================
 app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 50, mode: "daytrade" })));
@@ -2134,16 +1782,12 @@ app.get("/ui/gappers", (req, res) => res.type("html").send(renderUI({ path: "/ui
 app.get("/ui/smallcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/smallcap", group: "topGainers", cap: "small", limit: 80, mode: "daytrade" })));
 app.get("/ui/midcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/midcap", group: "topGainers", cap: "mid", limit: 80, mode: "daytrade" })));
 app.get("/ui/bigcap", (req, res) => res.type("html").send(renderUI({ path: "/ui/bigcap", group: "topGainers", cap: "big", limit: 80, mode: "daytrade" })));
-
 app.get("/ui/premarket", (req, res) => res.type("html").send(renderUI({ path: "/ui/premarket", group: "premarket", cap: "all", limit: 80, mode: "pro" })));
 app.get("/ui/aftermarket", (req, res) => res.type("html").send(renderUI({ path: "/ui/aftermarket", group: "aftermarket", cap: "all", limit: 80, mode: "pro" })));
 app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path: "/ui/snapshot-all", group: "snapshotAll", cap: "all", limit: 100, mode: "pro" })));
 
 // ============================================================================
 // SECTION 17 — API: Health + Config Inspect
-// What it is: Health + env/config views
-// Feature: /, /api, /env
-// Key kỹ thuật: envMissing + toggles view
 // Debug tag: SECTION17_API_HEALTH
 // ============================================================================
 app.get("/", (req, res) => {
@@ -2151,14 +1795,14 @@ app.get("/", (req, res) => {
     ok: true,
     message: `${BRAND.legal} running ✅`,
     ui: "/ui",
-    endpoints: ["/scan", "/list", "/premarket", "/aftermarket", "/snapshot-all", "/halts", "/help"],
+    endpoints: ["/scan", "/list", "/premarket", "/aftermarket", "/snapshot-all", "/halts", "/top-movers", "/help"],
   });
 });
 
 app.get("/api", (req, res) => {
   res.json({
     ok: true,
-    envMissing: envMissing(),
+    envMissingCore: envMissingFor({ needAggs: true, needSnapshotAll: true }),
     config: {
       port: PORT,
       authType: MASSIVE_AUTH_TYPE,
@@ -2185,36 +1829,18 @@ app.get("/api", (req, res) => {
   });
 });
 
-app.get("/env", (req, res) => {
-  res.json({
-    ok: true,
-    hasKey: Boolean(MASSIVE_API_KEY),
-    authType: MASSIVE_AUTH_TYPE,
-    queryKeyName: MASSIVE_QUERY_KEYNAME,
-    moverBase: MASSIVE_MOVER_URL,
-    tickerBase: MASSIVE_TICKER_SNAPSHOT_URL,
-    aggsBase: MASSIVE_AGGS_URL,
-    snapshotAllBase: MASSIVE_SNAPSHOT_ALL_URL,
-    enableSnapshotAll: ENABLE_SNAPSHOT_ALL,
-  });
-});
-
 // ============================================================================
 // SECTION 18 — API: /scan (Symbols Mode)
-// What it is: Scan user-entered symbol list
-// Feature: /scan?symbols=...
-// Key kỹ thuật: concurrency + normalize + optional indicators
 // Debug tag: SECTION18_SCAN_SYMBOLS
 // ============================================================================
 app.get("/scan", async (req, res) => {
   try {
-    const miss = envMissing().filter((x) => x !== "MASSIVE_SNAPSHOT_ALL_URL"); // scan doesn't need snapshot-all
-    if (miss.includes("MASSIVE_API_KEY") || miss.includes("MASSIVE_MOVER_URL") || miss.includes("MASSIVE_TICKER_SNAPSHOT_URL")) {
-      return res.status(400).json({ ok: false, error: "Missing env", miss });
-    }
+    const mode = String(req.query.mode || "daytrade").toLowerCase() === "pro" ? "pro" : "daytrade";
+    const needAggs = shouldEnableIndicators(mode);
+    const miss = envMissingFor({ needAggs, needSnapshotAll: false });
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
     const symbols = parseSymbols(req.query.symbols || "NVDA,TSLA,AAPL").slice(0, 100);
-    const mode = String(req.query.mode || "daytrade").toLowerCase() === "pro" ? "pro" : "daytrade";
 
     const snaps = await mapPool(symbols, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
@@ -2229,7 +1855,6 @@ app.get("/scan", async (req, res) => {
     const aggsErrors = [];
     rows = await attachIndicatorsIfEnabled(rows, mode, aggsErrors);
 
-    // filters + finalize + sorting
     rows = applySmartFilters(rows, req.query);
     rows = finalizeRows(rows, mode);
 
@@ -2245,9 +1870,7 @@ app.get("/scan", async (req, res) => {
       mode: "symbols",
       platformMode: mode,
       results: rows,
-      snapshotErrors: DEBUG
-        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
-        : undefined,
+      snapshotErrors: DEBUG ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail })) : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
   } catch (e) {
@@ -2257,22 +1880,19 @@ app.get("/scan", async (req, res) => {
 
 // ============================================================================
 // SECTION 19 — API: /list + /premarket + /aftermarket + /snapshot-all
-// What it is: Group scans + session scans
-// Feature: /list (movers), /premarket, /aftermarket, /snapshot-all
-// Key kỹ thuật: unified builders; safeguards; session engine
 // Debug tag: SECTION19_GROUP_ENDPOINTS
 // ============================================================================
 app.get("/list", async (req, res) => {
   try {
-    const miss = envMissing().filter((x) => x !== "MASSIVE_SNAPSHOT_ALL_URL"); // list doesn't need snapshot-all
-    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
-
     const group = String(req.query.group || "topGainers").trim();
     const cap = String(req.query.cap || "all").trim().toLowerCase();
     const limit = clamp(Number(req.query.limit || 50), 5, 200);
     const minGap = req.query.minGap;
-
     const mode = String(req.query.mode || "daytrade").toLowerCase() === "pro" ? "pro" : "daytrade";
+
+    const needAggs = shouldEnableIndicators(mode);
+    const miss = envMissingFor({ needAggs, needSnapshotAll: false });
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
     const out = await buildRowsFromMovers({ group, cap, limit, minGap, mode, query: req.query });
     return res.status(out.status).json(out.body);
@@ -2306,11 +1926,101 @@ app.get("/aftermarket", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 16+ — Platform Help (How to use)
-// What it is: Built-in usage guide
-// Feature: /help page (platform instructions)
-// Key kỹ thuật: static HTML for onboarding
-// Debug tag: SECTION16_HELP_GUIDE
+// SECTION 21 — Top Movers (Standalone Module)
+// What it is: Independent endpoint /top-movers (does NOT touch /list or /scan)
+// Debug tag: SECTION21_TOP_MOVERS
+// ============================================================================
+function topMoversSort(rows, sort) {
+  const s = String(sort || "abs").toLowerCase();
+  if (s === "gap") rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
+  else if (s === "score") rows.sort((a, b) => (b.demandScore ?? 0) - (a.demandScore ?? 0));
+  else if (s === "price") rows.sort((a, b) => (b.pricePct ?? 0) - (a.pricePct ?? 0));
+  else rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)); // abs
+}
+
+app.get("/top-movers", async (req, res) => {
+  try {
+    const direction = String(req.query.direction || "all").toLowerCase(); // all|gainers|losers
+    const limit = clamp(Number(req.query.limit || 80), 5, 200);
+    const cap = String(req.query.cap || "all").toLowerCase();
+    const sort = String(req.query.sort || "abs").toLowerCase(); // abs|price|gap|score
+    const minGap = n(req.query.minGap);
+
+    const indicatorsOn =
+      String(req.query.indicators ?? "").trim() === ""
+        ? ENABLE_5M_INDICATORS_PRO
+        : (String(req.query.indicators).toLowerCase() === "true" || String(req.query.indicators) === "1");
+
+    const miss = envMissingFor({ needAggs: indicatorsOn, needSnapshotAll: false });
+    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
+
+    // fetch movers
+    let moverTickers = [];
+    if (direction === "gainers" || direction === "losers") {
+      const mv = await fetchMovers(direction);
+      if (!mv.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: mv });
+      moverTickers = mv.rows
+        .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+        .filter(Boolean)
+        .slice(0, limit);
+    } else {
+      const [g, l] = await Promise.all([fetchMovers("gainers"), fetchMovers("losers")]);
+      if (!g.ok || !l.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: { gainers: g, losers: l } });
+      const mix = [
+        ...g.rows.slice(0, limit).map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase()),
+        ...l.rows.slice(0, limit).map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase()),
+      ].filter(Boolean);
+      moverTickers = Array.from(new Set(mix)); // unique
+    }
+
+    const snaps = await mapPool(moverTickers, SNAP_CONCURRENCY, async (t) => {
+      const r = await fetchTickerSnapshot(t);
+      return { ticker: t, ...r };
+    });
+
+    const good = snaps.filter((x) => x.ok);
+    const bad = snaps.filter((x) => !x.ok);
+    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
+
+    if (cap !== "all") rows = rows.filter((r) => r.cap === cap);
+    if (minGap !== null && Number.isFinite(minGap)) rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
+
+    const aggsErrors = [];
+    if (indicatorsOn) {
+      rows = await attachIndicatorsIfEnabled(rows, "pro", aggsErrors); // pro indicators style
+    } else {
+      rows = rows.map((r) => ({ ...r, paIcon: "" }));
+    }
+
+    rows = rows.map(attachVolFloat);
+    rows = rows.map((r) => {
+      const d = demandScore(r);
+      return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
+    });
+
+    topMoversSort(rows, sort);
+    rows = rows.slice(0, limit);
+
+    res.json({
+      ok: true,
+      module: "top-movers",
+      direction,
+      cap,
+      sort,
+      limit,
+      indicatorsOn,
+      results: rows,
+      snapshotErrors: DEBUG ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail })) : undefined,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "Top movers failed", detail: String(e?.message || e) });
+  }
+});
+
+// ============================================================================
+// SECTION 20 — Help + Listen + Startup Logs
+// Debug tag: SECTION20_LISTEN_STARTUP
 // ============================================================================
 app.get("/help", (req, res) => {
   const html = `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -2331,653 +2041,29 @@ app.get("/help", (req, res) => {
     <div class="card">
       <h1>${BRAND.mark} ${BRAND.legal}</h1>
       <div class="pill">${BRAND.subtitle}</div>
-      <p>Use <a href="/ui">/ui</a> for the platform dashboard. Tabs include Day Trade Core (Gainers/Losers/Gappers/Cap buckets) and Pro modules (Pre/After/Snapshot-All + HALT/RESUME).</p>
+      <p>Open <a href="/ui">/ui</a> for the platform dashboard. Tabs include Day Trade Core and Pro modules.</p>
 
-      <h2>Day Trade Core (Fast)</h2>
+      <h2>Day Trade Core</h2>
       <ul>
-        <li>Go to <code>/ui</code> → choose Group (Gainers/Losers/Gappers) and Cap (Small/Mid/Big), then click <b>Run</b>.</li>
-        <li>Enable <b>Auto Refresh</b> (default 30s) for active scanning.</li>
-        <li><b>Vol/Float icons</b> appear only when ≥ 1.5x (⚡🔥🚀💣 tiers).</li>
+        <li>Use Gainers/Losers/Gappers + Cap buckets. Hit <b>Run</b> and optionally Auto Refresh (30s).</li>
+        <li>Vol/Float icons show only when ≥ 1.5x.</li>
       </ul>
 
-      <h2>Pro Modules (Extended Hours)</h2>
+      <h2>Pro Modules</h2>
       <ul>
-        <li>Use <b>Pre-Market</b> / <b>After-Hours</b> tabs (requires Snapshot-All enabled).</li>
-        <li><b>HALT/RESUME</b>: halted rows show red ⛔. Resumes flash green.</li>
-        <li>Indicators (5m): <b>SMA26</b>, <b>EMA9</b>, <b>EMA34</b>, <b>VWAP</b> (enabled by ENV toggles).</li>
+        <li>Pre-Market / After-Hours require Snapshot-All enabled: <code>ENABLE_SNAPSHOT_ALL=true</code></li>
+        <li>HALT/RESUME: halted rows show red ⛔. Resumes flash green.</li>
+        <li>Indicators (5m): SMA26, EMA9, EMA34, VWAP (mode toggles via ENV).</li>
       </ul>
 
-      <h2>Alerts</h2>
+      <h2>Top Movers (Standalone)</h2>
       <ul>
-        <li>Click <b>Enable Notifications</b> and allow permissions.</li>
-        <li>Configure thresholds: Score / Gap% / Price% and VWAP signals.</li>
-        <li>Halted tickers are excluded from alerts.</li>
-      </ul>
-
-      <h2>Smart Filters</h2>
-      <ul>
-        <li>Use Min/Max Price, Min Vol, Min RVOL, Cap(B), Float(M) and Presets.</li>
-        <li>Filters are applied server-side to results.</li>
-      </ul>
-
-      <h2>Chart</h2>
-      <ul>
-        <li>Click any symbol to open TradingView chart in modal.</li>
-        <li>Ctrl/Cmd+Click or enable <b>Open new window</b> to open a new tab.</li>
-      </ul>
-
-      <h2>Admin / Debug</h2>
-      <ul>
-        <li>Config check: <code>/api</code> and <code>/env</code></li>
-        <li>Halt list: <code>/halts</code></li>
+        <li>Endpoint: <code>/top-movers?direction=all&limit=80&sort=abs</code></li>
+        <li>Enable indicators per call: <code>&indicators=1</code></li>
       </ul>
     </div>
   </div></body></html>`;
   res.type("html").send(html);
-});
-
-// ============================================================================
-// SECTION 20 — Listen + Startup Logs
-// What it is: Start server + start WS
-// Feature: app.listen + ws start + show URLs
-// Key kỹ thuật: graceful ws disable if missing
-// Debug tag: SECTION20_LISTEN_STARTUP
-// ============================================================================
-/**
- * top-movers.js (Standalone)
- * --------------------------------------------
- * ALGTP™ Top Movers Engine (Movers -> Snapshot -> Normalize -> Score)
- *
- * Run:
- *   npm i express axios dotenv
- *   node top-movers.js
- *
- * .env (minimum):
- *   PORT=3000
- *   MASSIVE_API_KEY=...
- *   MASSIVE_AUTH_TYPE=query|xapi|bearer
- *   MASSIVE_QUERY_KEYNAME=apiKey
- *   MASSIVE_MOVER_URL=https://api.massive.com/v2/snapshot/locale/us/markets/stocks
- *   MASSIVE_TICKER_SNAPSHOT_URL=https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers
- *
- * Optional (Indicators 5m):
- *   ENABLE_5M_INDICATORS=true|false
- *   MASSIVE_AGGS_URL=https://api.massive.com/v2/aggs/ticker
- *   AGGS_5M_LIMIT=80
- *   VOL_SPIKE_MULT=1.5
- *   VOL_AVG_LEN_5M=20
- */
-
-require("dotenv").config();
-const express = require("express");
-const axios = require("axios");
-
-const app = express();
-app.use(express.json());
-
-// ---------------- ENV ----------------
-const PORT = Number(process.env.PORT || 3000);
-
-const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
-const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim();
-const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
-
-const MASSIVE_MOVER_URL = String(
-  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
-).trim();
-
-const MASSIVE_TICKER_SNAPSHOT_URL = String(
-  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
-).trim();
-
-// ✅ IMPORTANT: declare before envMissing
-const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
-
-const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
-const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
-const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
-
-// Indicators toggles
-const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "false").toLowerCase() === "true";
-const AGGS_5M_LIMIT = clamp(Number(process.env.AGGS_5M_LIMIT || 80), 40, 5000);
-const VOL_SPIKE_MULT = clamp(Number(process.env.VOL_SPIKE_MULT || 1.5), 1.1, 10);
-const VOL_AVG_LEN_5M = clamp(Number(process.env.VOL_AVG_LEN_5M || 20), 5, 200);
-
-// ---------------- helpers ----------------
-function envMissing() {
-  const miss = [];
-  if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
-  if (!MASSIVE_MOVER_URL) miss.push("MASSIVE_MOVER_URL");
-  if (!MASSIVE_TICKER_SNAPSHOT_URL) miss.push("MASSIVE_TICKER_SNAPSHOT_URL");
-  // ✅ only require aggs if indicators enabled
-  if (ENABLE_5M_INDICATORS && !MASSIVE_AGGS_URL) miss.push("MASSIVE_AGGS_URL");
-  return miss;
-}
-
-function auth(params = {}, headers = {}) {
-  const t = String(MASSIVE_AUTH_TYPE).toLowerCase();
-
-  if (t === "query") params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
-  else if (t === "xapi") headers["x-api-key"] = MASSIVE_API_KEY;
-  else if (t === "bearer") headers["authorization"] = `Bearer ${MASSIVE_API_KEY}`;
-  else params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
-
-  headers["user-agent"] =
-    headers["user-agent"] ||
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
-
-  return { params, headers };
-}
-
-function n(x) {
-  const v = Number(x);
-  return Number.isFinite(v) ? v : null;
-}
-function round2(x) {
-  const v = n(x);
-  return v === null ? null : Number(v.toFixed(2));
-}
-function clamp(x, a, b) {
-  return Math.max(a, Math.min(b, x));
-}
-
-async function mapPool(items, concurrency, fn) {
-  const out = new Array(items.length);
-  let i = 0;
-
-  async function worker() {
-    while (true) {
-      const idx = i++;
-      if (idx >= items.length) return;
-      out[idx] = await fn(items[idx], idx);
-    }
-  }
-
-  const workers = Array.from({ length: concurrency }, () => worker());
-  await Promise.all(workers);
-  return out;
-}
-
-// ---------------- scoring (icon + alerts) ----------------
-function demandScore(row) {
-  const gap = Math.abs(n(row?.gapPct) ?? 0);
-  const pc = Math.abs(n(row?.pricePct) ?? 0);
-
-  let s = 0;
-  if (gap >= 20) s += 1;
-  if (gap >= 40) s += 1;
-  if (gap >= 60) s += 1;
-  if (pc >= 10) s += 1;
-  if (pc >= 20) s += 1;
-
-  // optional extra boost if both signals exist
-  if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
-
-  return clamp(s, 0, 5);
-}
-function signalIcon(d) {
-  if (d >= 5) return "🚀";
-  if (d >= 4) return "🔥";
-  if (d >= 3) return "👀";
-  return "⛔️";
-}
-function paSignalIcon(row) {
-  const above = Boolean(row?.aboveVWAP_5m);
-  const volSpike = Boolean(row?.volSpike_5m);
-  if (above && volSpike) return "🚨";
-  if (above) return "✅";
-  if (volSpike) return "🔊";
-  return "";
-}
-
-// ---------------- axios safe ----------------
-function axiosFail(e) {
-  if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
-
-  const code = e.code || null;
-  const msg = e.message || "axios error";
-  const url = e.config?.url || null;
-
-  if (!e.response) return { kind: "network", code, message: msg, url };
-
-  const status = e.response.status;
-  const data = e.response.data;
-  const bodyPreview = typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data).slice(0, 800);
-  return { kind: "http", status, message: msg, url, bodyPreview };
-}
-
-async function safeGet(url, { params, headers }) {
-  try {
-    const r = await axios.get(url, {
-      params,
-      headers,
-      timeout: 25000,
-      validateStatus: () => true,
-    });
-    return { ok: r.status < 400, status: r.status, data: r.data, url };
-  } catch (e) {
-    return { ok: false, status: null, data: null, url, errorDetail: axiosFail(e) };
-  }
-}
-
-// ---------------- Massive calls ----------------
-async function fetchMovers(direction = "gainers") {
-  const d = String(direction || "gainers").toLowerCase().trim();
-  const directionSafe = d === "losers" ? "losers" : "gainers";
-
-  const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
-  const url = `${base}/${directionSafe}`;
-
-  const params = {};
-  const headers = {};
-  if (INCLUDE_OTC) params["include_otc"] = "true";
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-
-  const rows = Array.isArray(r.data?.tickers)
-    ? r.data.tickers
-    : Array.isArray(r.data?.results)
-    ? r.data.results
-    : Array.isArray(r.data?.data)
-    ? r.data.data
-    : null;
-
-  return {
-    ok: r.ok && Array.isArray(rows),
-    url,
-    status: r.status,
-    rows: Array.isArray(rows) ? rows : [],
-    sample: Array.isArray(rows) ? rows[0] : r.data,
-    errorDetail: r.errorDetail,
-  };
-}
-
-async function fetchTickerSnapshot(ticker) {
-  const base = MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "");
-  const url = `${base}/${encodeURIComponent(String(ticker || "").trim().toUpperCase())}`;
-
-  const params = {};
-  const headers = {};
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-  return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
-}
-
-// ---------------- auto-detect fields ----------------
-function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
-  if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
-
-  const wanted = new Set(candidateKeys.map((k) => String(k).toLowerCase()));
-  const q = [{ v: obj, path: "root" }];
-  let visited = 0;
-
-  while (q.length && visited < maxNodes) {
-    const { v, path } = q.shift();
-    visited++;
-
-    if (!v || typeof v !== "object") continue;
-
-    if (Array.isArray(v)) {
-      for (let i = 0; i < v.length; i++) {
-        const item = v[i];
-        if (item && typeof item === "object") q.push({ v: item, path: `${path}[${i}]` });
-      }
-      continue;
-    }
-
-    for (const k of Object.keys(v)) {
-      const keyLower = String(k).toLowerCase();
-      const val = v[k];
-
-      if (wanted.has(keyLower)) {
-        const num = n(val);
-        if (num !== null) return { value: num, path: `${path}.${k}`, keyMatched: k };
-      }
-
-      if (val && typeof val === "object") q.push({ v: val, path: `${path}.${k}` });
-    }
-  }
-
-  return { value: null, path: null, keyMatched: null };
-}
-
-function capCategory(marketCap) {
-  const mc = n(marketCap);
-  if (mc === null) return null;
-  if (mc < 2_000_000_000) return "small";
-  if (mc < 10_000_000_000) return "mid";
-  return "big";
-}
-
-function floatCategory(floatShares) {
-  const fs = n(floatShares);
-  if (fs === null) return null;
-  if (fs < 10_000_000) return "nano";
-  if (fs < 20_000_000) return "low";
-  if (fs < 50_000_000) return "mid";
-  return "high";
-}
-
-function normalizeSnapshotAuto(ticker, snap) {
-  const root = snap?.results ?? snap ?? {};
-  const day = root?.day ?? root?.todays ?? root?.today ?? null;
-  const prev = root?.prevDay ?? root?.previousDay ?? root?.prev ?? null;
-
-  const lastTradePrice =
-    n(root?.lastTrade?.p) ??
-    n(root?.lastTrade?.price) ??
-    n(root?.last?.p) ??
-    n(root?.last) ??
-    n(root?.price) ??
-    null;
-
-  const dayClose = n(day?.c ?? day?.close ?? root?.close ?? root?.dayClose) ?? null;
-  const prevClose = n(prev?.c ?? prev?.close ?? root?.prevClose ?? root?.previousClose) ?? null;
-
-  let price = lastTradePrice ?? dayClose ?? null;
-  let open = n(day?.o ?? day?.open ?? root?.open) ?? null;
-  let volume = n(day?.v ?? day?.volume ?? root?.volume ?? root?.dayVolume) ?? null;
-
-  let pricePct =
-    n(root?.todaysChangePerc) ??
-    n(root?.todaysChangePercent) ??
-    n(root?.changePerc) ??
-    n(root?.changePercent) ??
-    null;
-
-  if (price === null) {
-    const fp = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]);
-    price = fp.value;
-  }
-  if (open === null) {
-    const fo = findFirstNumberByKeys(root, ["open", "o"]);
-    open = fo.value;
-  }
-
-  let prevC = prevClose;
-  if (prevC === null) {
-    const fpc = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]);
-    prevC = fpc.value;
-  }
-
-  if (volume === null) {
-    const fv = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]);
-    volume = fv.value;
-  }
-
-  if (pricePct === null && price !== null && prevC !== null && prevC > 0) {
-    pricePct = ((price - prevC) / prevC) * 100;
-  }
-
-  const gapPct = open !== null && prevC !== null && prevC > 0 ? ((open - prevC) / prevC) * 100 : null;
-
-  // Float
-  let floatShares =
-    n(root?.float) ??
-    n(root?.freeFloat) ??
-    n(root?.sharesFloat) ??
-    n(root?.floatShares) ??
-    null;
-
-  if (floatShares === null) {
-    const ff = findFirstNumberByKeys(root, [
-      "float",
-      "freefloat",
-      "free_float",
-      "sharesfloat",
-      "floatshares",
-      "publicfloat",
-      "public_float",
-    ]);
-    floatShares = ff.value;
-  }
-
-  // Market cap
-  let marketCap =
-    n(root?.marketCap) ??
-    n(root?.marketcap) ??
-    n(root?.mktcap) ??
-    n(root?.market_cap) ??
-    n(root?.marketCapitalization) ??
-    null;
-
-  if (marketCap === null) {
-    const mc = findFirstNumberByKeys(root, ["marketcap", "mktcap", "market_cap", "marketcapitalization", "cap", "capitalization"]);
-    marketCap = mc.value;
-  }
-
-  return {
-    symbol: String(ticker || "").trim().toUpperCase(),
-    price: price !== null ? round2(price) : null,
-    pricePct: pricePct !== null ? round2(pricePct) : null,
-    gapPct: gapPct !== null ? round2(gapPct) : null,
-    volume: volume !== null ? Math.round(volume) : null,
-
-    floatShares: floatShares !== null ? Math.round(floatShares) : null,
-    floatM: floatShares !== null ? round2(floatShares / 1_000_000) : null,
-    floatCat: floatCategory(floatShares),
-
-    marketCap: marketCap !== null ? Math.round(marketCap) : null,
-    marketCapB: marketCap !== null ? round2(marketCap / 1_000_000_000) : null,
-    cap: capCategory(marketCap),
-  };
-}
-
-// ---------------- 5m indicators (optional) ----------------
-function computeSMA(closes, len) {
-  if (!Array.isArray(closes) || closes.length < len) return null;
-  let sum = 0;
-  for (let i = closes.length - len; i < closes.length; i++) sum += closes[i];
-  return sum / len;
-}
-function computeEMA(closes, len) {
-  if (!Array.isArray(closes) || closes.length < len) return null;
-  const k = 2 / (len + 1);
-  // seed
-  let ema = 0;
-  for (let i = 0; i < len; i++) ema += closes[i];
-  ema /= len;
-  for (let i = len; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
-  return ema;
-}
-function computeVWAP(closes, volumes) {
-  if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length) return null;
-  let pv = 0, vv = 0;
-  for (let i = 0; i < closes.length; i++) {
-    const c = n(closes[i]);
-    const v = n(volumes[i]);
-    if (c === null || v === null || v <= 0) continue;
-    pv += c * v; vv += v;
-  }
-  if (vv <= 0) return null;
-  return pv / vv;
-}
-function computeAvg(arr) {
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-  let s = 0, c = 0;
-  for (const x of arr) {
-    const v = n(x);
-    if (v === null) continue;
-    s += v; c++;
-  }
-  if (c === 0) return null;
-  return s / c;
-}
-
-function indicatorsFromAggs5m(barsDesc) {
-  if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
-    return { sma26_5m:null, ema9_5m:null, ema34_5m:null, vwap_5m:null, lastVol_5m:null, avgVol_5m:null };
-  }
-
-  const bars = barsDesc
-    .map((b) => ({ c: n(b?.c ?? b?.close), v: n(b?.v ?? b?.volume) }))
-    .filter((x) => x.c !== null)
-    .slice(0, 600);
-
-  const barsChrono = [...bars].reverse();
-  const closes = barsChrono.map((x) => x.c);
-  const vols = barsChrono.map((x) => x.v ?? 0);
-
-  const sma26 = closes.length >= 26 ? computeSMA(closes, 26) : null;
-  const ema9 = computeEMA(closes, 9);
-  const ema34 = computeEMA(closes, 34);
-  const vwap = computeVWAP(closes, vols);
-
-  const lastBar = barsChrono[barsChrono.length - 1] || null;
-  const lastVol = lastBar?.v ?? null;
-  const avgVol = computeAvg(vols.slice(-VOL_AVG_LEN_5M));
-
-  return {
-    sma26_5m: sma26 !== null ? round2(sma26) : null,
-    ema9_5m: ema9 !== null ? round2(ema9) : null,
-    ema34_5m: ema34 !== null ? round2(ema34) : null,
-    vwap_5m: vwap !== null ? round2(vwap) : null,
-    lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
-    avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
-  };
-}
-
-const aggsCache = new Map(); // SYM|5m -> {ts,bars}
-async function fetchAggs5m(ticker) {
-  const sym = String(ticker || "").trim().toUpperCase();
-  const cacheKey = `${sym}|5m`;
-  const now = Date.now();
-  const hit = aggsCache.get(cacheKey);
-  if (hit && now - hit.ts < 25_000) return { ok: true, cached: true, bars: hit.bars };
-
-  const base = MASSIVE_AGGS_URL.replace(/\/+$/, "");
-  const to = ymd(new Date());
-  const from = ymd(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
-  const url = `${base}/${encodeURIComponent(sym)}/range/5/minute/${from}/${to}`;
-
-  const params = { adjusted:"true", sort:"desc", limit:String(AGGS_5M_LIMIT) };
-  const headers = {};
-  const a = auth(params, headers);
-
-  const r = await safeGet(url, { params: a.params, headers: a.headers });
-  const bars = Array.isArray(r.data?.results) ? r.data.results : [];
-  const ok = r.ok && bars.length > 0;
-
-  if (ok) aggsCache.set(cacheKey, { ts: now, bars });
-  return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
-}
-
-function attach5mSignals(row) {
-  const price = n(row?.price);
-  const vwap = n(row?.vwap_5m);
-  const lastVol = n(row?.lastVol_5m);
-  const avgVol = n(row?.avgVol_5m);
-
-  const aboveVWAP = price !== null && vwap !== null ? price > vwap : false;
-  const volSpike = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol >= avgVol * VOL_SPIKE_MULT : false;
-
-  const rvol = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol / avgVol : null;
-
-  return {
-    ...row,
-    aboveVWAP_5m: aboveVWAP,
-    volSpike_5m: volSpike,
-    rvol_5m: rvol !== null ? round2(rvol) : null,
-    paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }),
-  };
-}
-
-// ---------------- Top Movers endpoint ----------------
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "ALGTP™ Standalone Top Movers Engine ✅",
-    endpoint: "/top-movers?direction=gainers|losers&limit=50&sort=price|gap&minGap=10&cap=all|small|mid|big",
-    indicators: { ENABLE_5M_INDICATORS },
-  });
-});
-
-app.get("/top-movers", async (req, res) => {
-  try {
-    const miss = envMissing();
-    if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
-
-    const direction = String(req.query.direction || "gainers").toLowerCase() === "losers" ? "losers" : "gainers";
-    const limit = clamp(Number(req.query.limit || 50), 5, 200);
-    const cap = String(req.query.cap || "all").toLowerCase();
-    const sort = String(req.query.sort || "price").toLowerCase(); // price|gap
-    const minGap = n(req.query.minGap);
-
-    // 1) movers
-    const movers = await fetchMovers(direction);
-    if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
-
-    // 2) tickers
-    const tickers = movers.rows
-      .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
-      .filter(Boolean)
-      .slice(0, limit);
-
-    // 3) snapshots
-    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
-      const r = await fetchTickerSnapshot(t);
-      return { ticker: t, ...r };
-    });
-
-    const good = snaps.filter((x) => x.ok);
-    const bad = snaps.filter((x) => !x.ok);
-
-    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
-
-    // cap filter
-    if (cap !== "all") rows = rows.filter((r) => r.cap === cap);
-
-    // gappers filter if requested
-    if (minGap !== null && Number.isFinite(minGap)) rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
-
-    // 4) optional indicators
-    const aggsErrors = [];
-    if (ENABLE_5M_INDICATORS) {
-      const ind = await mapPool(rows, SNAP_CONCURRENCY, async (r) => {
-        const a = await fetchAggs5m(r.symbol);
-        if (!a.ok) {
-          aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
-          return { symbol: r.symbol, sma26_5m:null, ema9_5m:null, ema34_5m:null, vwap_5m:null, lastVol_5m:null, avgVol_5m:null };
-        }
-        return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
-      });
-      const mapInd = new Map(ind.map((x) => [x.symbol, x]));
-      rows = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
-      rows = rows.map((r) => attach5mSignals(r));
-    } else {
-      rows = rows.map((r) => ({ ...r, paIcon: "" }));
-    }
-
-    // 5) scoring + icons
-    rows = rows.map((r) => {
-      const d = demandScore(r);
-      return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
-    });
-
-    // 6) sort
-    if (sort === "gap") rows.sort((a,b)=> Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
-    else rows.sort((a,b)=> Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
-
-    return res.json({
-      ok: true,
-      direction,
-      cap,
-      limit,
-      sort,
-      results: rows,
-      snapshotErrors: DEBUG ? bad.slice(0,10).map(x=>({ ticker:x.ticker, status:x.status, url:x.url, errorDetail:x.errorDetail })) : undefined,
-      aggsErrors: DEBUG ? aggsErrors.slice(0,10) : undefined,
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "Top movers failed", detail: String(e?.message || e) });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`✅ ALGTP™ Top Movers running http://localhost:${PORT}`);
-  console.log(`🔎 Try: http://localhost:${PORT}/top-movers?direction=gainers&limit=50`);
 });
 
 startHaltWebSocket();
@@ -2987,5 +2073,6 @@ app.listen(PORT, () => {
   console.log(`🚀 UI: http://localhost:${PORT}/ui`);
   console.log(`📘 Help: http://localhost:${PORT}/help`);
   console.log(`⛔ HALTS: http://localhost:${PORT}/halts`);
+  console.log(`🧭 Top Movers: http://localhost:${PORT}/top-movers?direction=all&limit=80&sort=abs`);
   if (!ENABLE_SNAPSHOT_ALL) console.log(`⚠️ Snapshot-All is OFF (ENABLE_SNAPSHOT_ALL=false).`);
 });

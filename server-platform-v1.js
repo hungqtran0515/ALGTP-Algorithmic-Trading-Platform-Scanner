@@ -75,17 +75,15 @@ const BRAND = {
 };
 
 // ============================================================================
-// SECTION 02 — Imports + App Boot (ES Modules)
+// SECTION 02 — Imports + App Boot (CommonJS)
 // What it is: init server runtime
 // Feature: express + axios + dotenv
 // Key kỹ thuật: minimal deps, stable runtime
 // Debug tag: SECTION02_BOOT_IMPORTS
 // ============================================================================
-import dotenv from "dotenv";
-import express from "express";
-import axios from "axios";
-
-dotenv.config();
+require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
 
 const app = express();
 app.use(express.json());

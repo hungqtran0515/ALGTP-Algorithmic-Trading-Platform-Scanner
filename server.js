@@ -1,15 +1,21 @@
 // ============================================================================
-// ALGTP™ — Massive Scanner (REST + WS HALT + WS AM Fallback)
-// Focus: /premarket /aftermarket (Snapshot-All OR AM.* fallback) + cap buckets
+// 🔥 ALGTP™ — Massive Scanner (REST + WS HALT + WS AM fallback)
+// Single-file Node.js (CommonJS)
+// ----------------------------------------------------------------------------
+// Features:
+// - UI: /ui (+ tabs)
+// - API: /list, /scan, /snapshot-all, /premarket, /aftermarket, /halts, /api
+// - Snapshot-All ON: Pre/After uses Snapshot-All (accurate cap/float)
+// - Snapshot-All OFF: Pre/After uses AM WS fallback + REST snapshot enrich cache
+// - 5m Indicators (optional): SMA/EMA/VWAP + VWAP/VolSpike signal
+// - HALT WS (optional): LULD.*
 // ============================================================================
 
-// ============================================================================
-// SECTION 01 — Imports + App Init
-// ============================================================================
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 
+// ws optional
 let WebSocketLib = null;
 try {
   WebSocketLib = require("ws");
@@ -21,9 +27,15 @@ const app = express();
 app.use(express.json());
 
 // ============================================================================
-// SECTION 02 — ENV + Config
+// SECTION 01 — ENV + Config
 // ============================================================================
+const BRAND = {
+  mark: "🔥",
+  legal: "ALGTP™ – Algorithmic Trading Platform",
+};
+
 const PORT = Number(process.env.PORT || 3000);
+const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
 const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim(); // query | xapi | bearer
@@ -37,55 +49,40 @@ const MASSIVE_TICKER_SNAPSHOT_URL = String(
   process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
-// Snapshot ALL tickers (pre/after/snapshot-all scanners)
 const MASSIVE_SNAPSHOT_ALL_URL = String(
   process.env.MASSIVE_SNAPSHOT_ALL_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
 ).trim();
 
-// Toggle Snapshot-All usage
 const ENABLE_SNAPSHOT_ALL = String(process.env.ENABLE_SNAPSHOT_ALL || "false").toLowerCase() === "true";
 
-// Aggs
 const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
 const AGGS_INCLUDE_PREPOST = String(process.env.AGGS_INCLUDE_PREPOST || "true").toLowerCase() === "true";
 
-// Optional dividends
+const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
+const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
+
+const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
+const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
+
 const MASSIVE_DIVIDENDS_URL = String(process.env.MASSIVE_DIVIDENDS_URL || "https://api.massive.com/v3/reference/dividends").trim();
 
 const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
 const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
-const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 
-// Indicators
-const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
-const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
-
-// Volume spike thresholds
-const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
-const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
-
-// WS (HALT + AM)
 const MASSIVE_WS_URL = String(process.env.MASSIVE_WS_URL || "wss://socket.massive.com/stocks").trim();
 
 // HALT WS
 const ENABLE_HALT_WS = String(process.env.ENABLE_HALT_WS || "true").toLowerCase() === "true";
 
-// AM WS (Minute Aggregates) fallback for pre/after
+// AM WS fallback
 const ENABLE_AM_WS = String(process.env.ENABLE_AM_WS || "true").toLowerCase() === "true";
 const AM_WS_SUBS = String(process.env.AM_WS_SUBS || "AM.*").trim();
 const AM_CACHE_MAX = Math.max(200, Math.min(20000, Number(process.env.AM_CACHE_MAX || 8000)));
 
-// AM enrich (so cap filter works even when Snapshot-All OFF)
+// AM enrich snapshot cache
 const AM_ENRICH_LIMIT = Math.max(50, Math.min(500, Number(process.env.AM_ENRICH_LIMIT || 200)));
 const AM_ENRICH_TTL_MS = Math.max(5000, Math.min(300000, Number(process.env.AM_ENRICH_TTL_MS || 60000)));
 
-// Brand (optional)
-const BRAND = {
-  mark: "🔥",
-  legal: "ALGTP™ – Algorithmic Trading Platform",
-};
-
-// Fail-fast core env
 if (!MASSIVE_API_KEY || !MASSIVE_MOVER_URL || !MASSIVE_TICKER_SNAPSHOT_URL) {
   console.error("❌ Missing ENV. Required:");
   console.error(" - MASSIVE_API_KEY");
@@ -95,7 +92,7 @@ if (!MASSIVE_API_KEY || !MASSIVE_MOVER_URL || !MASSIVE_TICKER_SNAPSHOT_URL) {
 }
 
 // ============================================================================
-// SECTION 03 — Helpers
+// SECTION 02 — Helpers
 // ============================================================================
 function envMissingFor({ needSnapshotAll = false, needAggs = false } = {}) {
   const miss = [];
@@ -109,7 +106,6 @@ function envMissingFor({ needSnapshotAll = false, needAggs = false } = {}) {
 
 function auth(params = {}, headers = {}) {
   const t = String(MASSIVE_AUTH_TYPE).toLowerCase();
-
   if (t === "query") params[MASSIVE_QUERY_KEYNAME || "apiKey"] = MASSIVE_API_KEY;
   else if (t === "xapi") headers["x-api-key"] = MASSIVE_API_KEY;
   else if (t === "bearer") headers["authorization"] = `Bearer ${MASSIVE_API_KEY}`;
@@ -119,13 +115,6 @@ function auth(params = {}, headers = {}) {
     headers["user-agent"] ||
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
   return { params, headers };
-}
-
-function parseSymbols(input) {
-  return String(input || "")
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
 }
 
 function n(x) {
@@ -139,7 +128,12 @@ function round2(x) {
 function clamp(x, a, b) {
   return Math.max(a, Math.min(b, x));
 }
-
+function parseSymbols(input) {
+  return String(input || "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
 async function mapPool(items, concurrency, fn) {
   const out = new Array(items.length);
   let i = 0;
@@ -150,8 +144,7 @@ async function mapPool(items, concurrency, fn) {
       out[idx] = await fn(items[idx], idx);
     }
   }
-  const workers = Array.from({ length: concurrency }, () => worker());
-  await Promise.all(workers);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return out;
 }
 
@@ -163,7 +156,7 @@ function ymd(d) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-// ================= Session utils =================
+// time/session
 function toMs(ts) {
   const x = n(ts);
   if (x === null) return null;
@@ -172,16 +165,10 @@ function toMs(ts) {
   if (x > 1e9) return Math.floor(x * 1000);
   return null;
 }
-
 function nyHM(ms) {
   try {
     const d = new Date(ms);
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).formatToParts(d);
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d);
     const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
     const m = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
     return { h, m };
@@ -189,7 +176,6 @@ function nyHM(ms) {
     return { h: 0, m: 0 };
   }
 }
-
 function sessionOfMs(ms) {
   const { h, m } = nyHM(ms);
   const mins = h * 60 + m;
@@ -200,7 +186,7 @@ function sessionOfMs(ms) {
 }
 
 // ============================================================================
-// SECTION 04 — Scoring + Icons
+// SECTION 03 — Scoring + Icons
 // ============================================================================
 function demandScore(row) {
   const gap = Math.abs(n(row?.gapPct) ?? 0);
@@ -216,14 +202,12 @@ function demandScore(row) {
   if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
   return clamp(s, 0, 5);
 }
-
 function signalIcon(d) {
   if (d >= 5) return "🚀";
   if (d >= 4) return "🔥";
   if (d >= 3) return "👀";
   return "⛔️";
 }
-
 function paSignalIcon(row) {
   const above = Boolean(row?.aboveVWAP_5m);
   const volSpike = Boolean(row?.volSpike_5m);
@@ -234,7 +218,7 @@ function paSignalIcon(row) {
 }
 
 // ============================================================================
-// SECTION 05 — Axios Safe Layer
+// SECTION 04 — Axios Safe
 // ============================================================================
 function axiosFail(e) {
   if (!e || !e.isAxiosError) return { kind: "unknown", message: String(e?.message || e) };
@@ -248,15 +232,9 @@ function axiosFail(e) {
   const bodyPreview = typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data).slice(0, 800);
   return { kind: "http", status, message: msg, url, bodyPreview };
 }
-
 async function safeGet(url, { params, headers }) {
   try {
-    const r = await axios.get(url, {
-      params,
-      headers,
-      timeout: 25000,
-      validateStatus: () => true,
-    });
+    const r = await axios.get(url, { params, headers, timeout: 25000, validateStatus: () => true });
     return { ok: r.status < 400, status: r.status, data: r.data, url };
   } catch (e) {
     return { ok: false, status: null, data: null, url, errorDetail: axiosFail(e) };
@@ -264,20 +242,17 @@ async function safeGet(url, { params, headers }) {
 }
 
 // ============================================================================
-// SECTION 06 — Massive REST Calls
+// SECTION 05 — Massive REST calls
 // ============================================================================
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
   const directionSafe = d === "losers" ? "losers" : "gainers";
-
   const base = MASSIVE_MOVER_URL.replace(/\/+$/, "");
   const url = `${base}/${directionSafe}`;
 
   const params = {};
-  const headers = {};
-  if (INCLUDE_OTC) params["include_otc"] = "true";
-  const a = auth(params, headers);
-
+  if (INCLUDE_OTC) params.include_otc = "true";
+  const a = auth(params, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
 
   const rows = Array.isArray(r.data?.tickers)
@@ -288,19 +263,12 @@ async function fetchMovers(direction = "gainers") {
     ? r.data.data
     : [];
 
-  return {
-    ok: r.ok && Array.isArray(rows),
-    url,
-    status: r.status,
-    rows,
-    errorDetail: r.errorDetail,
-  };
+  return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows, errorDetail: r.errorDetail };
 }
 
 async function fetchTickerSnapshot(ticker) {
   const base = MASSIVE_TICKER_SNAPSHOT_URL.replace(/\/+$/, "");
   const url = `${base}/${encodeURIComponent(String(ticker || "").trim().toUpperCase())}`;
-
   const a = auth({}, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
   return { ok: r.ok, url, status: r.status, data: r.data, errorDetail: r.errorDetail };
@@ -332,9 +300,7 @@ async function fetchAggs5m(ticker) {
 
   const params = { adjusted: "true", sort: "desc", limit: String(AGGS_5M_LIMIT) };
   if (AGGS_INCLUDE_PREPOST) params.includePrePost = "true";
-
-  const headers = {};
-  const a = auth(params, headers);
+  const a = auth(params, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
 
   const bars = Array.isArray(r.data?.results) ? r.data.results : [];
@@ -342,40 +308,35 @@ async function fetchAggs5m(ticker) {
 }
 
 // ============================================================================
-// SECTION 07 — Normalize Snapshot (auto-detect)
+// SECTION 06 — Normalize Snapshot (auto)
 // ============================================================================
 function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
-  if (!obj || typeof obj !== "object") return { value: null, path: null, keyMatched: null };
+  if (!obj || typeof obj !== "object") return { value: null };
   const wanted = new Set(candidateKeys.map((k) => String(k).toLowerCase()));
-  const q = [{ v: obj, path: "root" }];
+  const q = [{ v: obj }];
   let visited = 0;
 
   while (q.length && visited < maxNodes) {
-    const { v, path } = q.shift();
+    const { v } = q.shift();
     visited++;
     if (!v || typeof v !== "object") continue;
 
     if (Array.isArray(v)) {
-      for (let i = 0; i < v.length; i++) {
-        const item = v[i];
-        if (item && typeof item === "object") q.push({ v: item, path: `${path}[${i}]` });
-      }
+      for (const item of v) if (item && typeof item === "object") q.push({ v: item });
       continue;
     }
 
     for (const k of Object.keys(v)) {
       const keyLower = String(k).toLowerCase();
       const val = v[k];
-
       if (wanted.has(keyLower)) {
         const num = n(val);
-        if (num !== null) return { value: num, path: `${path}.${k}`, keyMatched: k };
+        if (num !== null) return { value: num };
       }
-      if (val && typeof val === "object") q.push({ v: val, path: `${path}.${k}` });
+      if (val && typeof val === "object") q.push({ v: val });
     }
   }
-
-  return { value: null, path: null, keyMatched: null };
+  return { value: null };
 }
 
 function capCategory(marketCap) {
@@ -421,17 +382,16 @@ function normalizeSnapshotAuto(ticker, snap) {
     n(root?.changePercent) ??
     null;
 
-  if (price === null) price = findFirstNumberByKeys(root, ["price", "last", "lastprice", "last_price", "p", "c", "close"]).value;
+  if (price === null) price = findFirstNumberByKeys(root, ["price", "last", "p", "c", "close"]).value;
   if (open === null) open = findFirstNumberByKeys(root, ["open", "o"]).value;
 
   let prevClose = prevClose0;
-  if (prevClose === null) prevClose = findFirstNumberByKeys(root, ["prevclose", "previousclose", "prev_close", "pc", "prevc"]).value;
-  if (volume === null) volume = findFirstNumberByKeys(root, ["volume", "v", "dayvolume", "day_volume"]).value;
+  if (prevClose === null) prevClose = findFirstNumberByKeys(root, ["prevclose", "previousclose", "pc", "prevc"]).value;
+  if (volume === null) volume = findFirstNumberByKeys(root, ["volume", "v", "dayvolume"]).value;
 
   if (pricePct === null && price !== null && prevClose !== null && prevClose > 0) {
     pricePct = ((price - prevClose) / prevClose) * 100;
   }
-
   const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : null;
 
   let floatShares =
@@ -442,7 +402,7 @@ function normalizeSnapshotAuto(ticker, snap) {
     null;
 
   if (floatShares === null) {
-    floatShares = findFirstNumberByKeys(root, ["float", "freefloat", "free_float", "sharesfloat", "floatshares", "publicfloat", "public_float"]).value;
+    floatShares = findFirstNumberByKeys(root, ["float", "freefloat", "sharesfloat", "floatshares"]).value;
   }
 
   let marketCap =
@@ -454,7 +414,7 @@ function normalizeSnapshotAuto(ticker, snap) {
     null;
 
   if (marketCap === null) {
-    marketCap = findFirstNumberByKeys(root, ["marketcap", "mktcap", "market_cap", "marketcapitalization", "cap", "capitalization"]).value;
+    marketCap = findFirstNumberByKeys(root, ["marketcap", "mktcap", "market_cap", "capitalization"]).value;
   }
 
   const marketCapEst = marketCap === null && price !== null && floatShares !== null ? price * floatShares : null;
@@ -462,6 +422,7 @@ function normalizeSnapshotAuto(ticker, snap) {
 
   return {
     symbol: String(ticker || "").trim().toUpperCase(),
+
     price: price !== null ? round2(price) : null,
     open: open !== null ? round2(open) : null,
     prevClose: prevClose !== null ? round2(prevClose) : null,
@@ -496,7 +457,7 @@ function capPass(row, cap) {
 }
 
 // ============================================================================
-// SECTION 08 — Indicators Engine (SMA/EMA/VWAP) + attach signals
+// SECTION 07 — 5m Indicators (optional)
 // ============================================================================
 function computeSMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
@@ -504,7 +465,6 @@ function computeSMA(closes, len) {
   for (let i = closes.length - len; i < closes.length; i++) sum += closes[i];
   return sum / len;
 }
-
 function computeEMA(closes, len) {
   if (!Array.isArray(closes) || closes.length < len) return null;
   const k = 2 / (len + 1);
@@ -513,7 +473,6 @@ function computeEMA(closes, len) {
   for (let i = len; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
   return ema;
 }
-
 function computeVWAP(closes, volumes) {
   if (!Array.isArray(closes) || !Array.isArray(volumes) || closes.length === 0 || closes.length !== volumes.length) return null;
   let pv = 0, vv = 0;
@@ -526,7 +485,6 @@ function computeVWAP(closes, volumes) {
   if (vv <= 0) return null;
   return pv / vv;
 }
-
 function computeAvg(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return null;
   let s = 0, c = 0;
@@ -604,12 +562,11 @@ async function attachIndicatorsIfEnabled(rows) {
 }
 
 // ============================================================================
-// SECTION 09 — HALT WS (LULD) + /halts
+// SECTION 08 — HALT WS (LULD) + /halts
 // ============================================================================
-const haltedMap = new Map(); // symbol -> { halted, lastEvent, tsMs, reason }
-function nowMs() { return Date.now(); }
-function setHalt(sym) { haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: nowMs(), reason: "LULD" }); }
-function setResume(sym) { haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: nowMs(), reason: "LULD" }); }
+const haltedMap = new Map();
+function setHalt(sym) { haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: Date.now(), reason: "LULD" }); }
+function setResume(sym) { haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: Date.now(), reason: "LULD" }); }
 
 function handleLULD(payload) {
   const msgs = Array.isArray(payload) ? payload : [payload];
@@ -627,17 +584,16 @@ function handleLULD(payload) {
   }
 }
 
-let haltWsInstance = null;
+let haltWs = null;
 function startHaltWebSocket() {
   if (!ENABLE_HALT_WS) return;
   if (!WebSocketLib) return console.log("⚠️ HALT WS disabled: npm i ws");
   if (!MASSIVE_API_KEY) return console.log("⚠️ HALT WS disabled: missing MASSIVE_API_KEY");
 
-  try { if (haltWsInstance && haltWsInstance.readyState === 1) return; } catch {}
+  try { if (haltWs && haltWs.readyState === 1) return; } catch {}
 
   const ws = new WebSocketLib(MASSIVE_WS_URL);
-  haltWsInstance = ws;
-
+  haltWs = ws;
   let subscribed = false;
 
   ws.on("open", () => {
@@ -663,7 +619,7 @@ function startHaltWebSocket() {
 
   ws.on("close", () => {
     console.log("⚠️ HALT WS closed. Reconnect in 3s...");
-    haltWsInstance = null;
+    haltWs = null;
     setTimeout(startHaltWebSocket, 3000);
   });
 
@@ -690,10 +646,10 @@ app.get("/halts", (req, res) => {
 });
 
 // ============================================================================
-// SECTION 10 — AM WS (Minute Aggregates) cache + enrich snapshots
+// SECTION 09 — AM WS cache + snapshot enrich
 // ============================================================================
-const amMap = new Map(); // sym -> { ...AM payload, _recvTs }
-let amWsInstance = null;
+const amMap = new Map(); // sym -> AM payload
+let amWs = null;
 
 function trimAMCache() {
   if (amMap.size <= AM_CACHE_MAX) return;
@@ -723,11 +679,10 @@ function startAMWebSocket() {
   if (!WebSocketLib) return console.log("⚠️ AM WS disabled: npm i ws");
   if (!MASSIVE_API_KEY) return console.log("⚠️ AM WS disabled: missing MASSIVE_API_KEY");
 
-  try { if (amWsInstance && amWsInstance.readyState === 1) return; } catch {}
+  try { if (amWs && amWs.readyState === 1) return; } catch {}
 
   const ws = new WebSocketLib(MASSIVE_WS_URL);
-  amWsInstance = ws;
-
+  amWs = ws;
   let subscribed = false;
 
   ws.on("open", () => {
@@ -753,15 +708,15 @@ function startAMWebSocket() {
 
   ws.on("close", () => {
     console.log("⚠️ AM WS closed. Reconnect in 3s...");
-    amWsInstance = null;
+    amWs = null;
     setTimeout(startAMWebSocket, 3000);
   });
 
   ws.on("error", (err) => console.log("⚠️ AM WS error:", String(err?.message || err)));
 }
 
-// Snapshot enrich cache (so cap filter works during AM fallback)
-const amSnapCache = new Map(); // sym -> {ts, row}
+// snapshot enrich cache
+const amSnapCache = new Map(); // sym -> {ts,row}
 function getSnapCached(sym) {
   const hit = amSnapCache.get(sym);
   if (!hit) return null;
@@ -772,39 +727,29 @@ function setSnapCached(sym, row) {
   amSnapCache.set(sym, { ts: Date.now(), row });
 }
 
-// Build AM rows (with optional enrich)
 function normalizeFromAMOnly(sym, am) {
   const price = n(am?.c) ?? null;
   const op = n(am?.op) ?? null;
   const extPct = price !== null && op !== null && op > 0 ? ((price - op) / op) * 100 : null;
-
   const vol = n(am?.av) ?? n(am?.v) ?? null;
   const ms = toMs(am?.e) || toMs(am?.s);
 
   return {
     symbol: sym,
     price: price !== null ? round2(price) : null,
-    open: null,
-    prevClose: null,
     pricePct: null,
     gapPct: null,
     extPct: extPct !== null ? round2(extPct) : null,
     volume: vol !== null ? Math.round(vol) : null,
-
-    floatShares: null,
     floatM: null,
-    floatCat: null,
-    marketCap: null,
     marketCapB: null,
     cap: null,
-
     source: "AM_WS",
     am_ts: ms,
   };
 }
 
 function mergeAMWithSnapshot(amRow, snapRow) {
-  // prefer AM price (more realtime)
   const price = n(amRow?.price) ?? n(snapRow?.price);
   const prevClose = n(snapRow?.prevClose);
   const open = n(snapRow?.open);
@@ -820,8 +765,6 @@ function mergeAMWithSnapshot(amRow, snapRow) {
   return {
     ...snapRow,
     price: price !== null ? round2(price) : null,
-    prevClose: prevClose !== null ? round2(prevClose) : null,
-    open: open !== null ? round2(open) : null,
     pricePct: pricePct !== null ? round2(pricePct) : null,
     gapPct: gapPct !== null ? round2(gapPct) : null,
     extPct: extPct !== null ? round2(extPct) : null,
@@ -832,13 +775,12 @@ function mergeAMWithSnapshot(amRow, snapRow) {
 }
 
 // ============================================================================
-// SECTION 11 — Builders (list/scan/snapshot-all/pre/after)
+// SECTION 10 — Builders
 // ============================================================================
 function groupToDirection(group) {
   if (group === "topLosers") return "losers";
   return "gainers";
 }
-
 function sortRowsByGroup(rows, group) {
   if (group === "topGappers") rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
   else rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
@@ -855,11 +797,7 @@ function finalizeRows(rows) {
 
 async function buildRowsFromSnapshotAll({ cap, limit, session }) {
   if (!ENABLE_SNAPSHOT_ALL) {
-    return {
-      ok: false,
-      status: 403,
-      body: { ok: false, error: "Snapshot-All disabled", hint: "Set ENABLE_SNAPSHOT_ALL=true (or use AM WS fallback for /premarket /aftermarket)." },
-    };
+    return { ok: false, status: 403, body: { ok: false, error: "Snapshot-All is OFF", hint: "Set ENABLE_SNAPSHOT_ALL=true or use AM WS fallback." } };
   }
 
   const miss = envMissingFor({ needSnapshotAll: true, needAggs: ENABLE_5M_INDICATORS });
@@ -909,7 +847,7 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
 }
 
 async function buildRowsFromAMCache({ cap, limit, session }) {
-  // Build base AM rows first
+  // 1) base AM rows
   let base = [];
   for (const [sym, am] of amMap.entries()) {
     const ms = toMs(am?.e) || toMs(am?.s);
@@ -918,47 +856,40 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
     base.push(normalizeFromAMOnly(sym, am));
   }
 
-  // If AM cache empty, return quickly
   if (!base.length) {
     return { ok: true, status: 200, body: { ok: true, source: "AM_WS", session, cap, results: [] } };
   }
 
-  // Enrich top symbols with REST snapshots (so cap filter works)
-  // We enrich more when cap filter requested
-  const lim = clamp(Number(limit || 100), 5, 500);
+  // 2) pick candidates for enrichment
   const needCap = String(cap || "all").toLowerCase() !== "all";
-
-  // pick candidates for enrichment (highest volume / biggest move)
-  const candidates = [...base].sort(
-    (a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0)
-  );
+  const candidates = [...base].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0));
   const pick = candidates.slice(0, AM_ENRICH_LIMIT).map((x) => x.symbol);
 
-  // Fetch missing snapshots (cached)
+  // 3) fetch missing snapshots into cache
   const toFetch = pick.filter((sym) => !getSnapCached(sym));
   if (toFetch.length) {
     const snaps = await mapPool(toFetch, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
       return { ticker: t, ...r };
     });
-
     for (const s of snaps) {
       if (s.ok) setSnapCached(s.ticker, normalizeSnapshotAuto(s.ticker, s.data));
     }
   }
 
-  // Merge AM with snapshot where available
+  // 4) merge
   let rows = base.map((r) => {
     const snapRow = getSnapCached(r.symbol);
     return snapRow ? mergeAMWithSnapshot(r, snapRow) : r;
   });
 
-  // Apply cap filter only if we have cap data; AM-only rows have cap null => drop when cap requested
+  // 5) cap filter: if cap requested, drop AM-only rows (cap null)
   if (needCap) rows = rows.filter((r) => capPass(r, cap));
 
-  // Attach indicators on top N only (to keep fast)
+  // 6) attach indicators only to top N to keep fast
+  const lim = clamp(Number(limit || 100), 5, 500);
   rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
-  rows = rows.slice(0, Math.max(lim * 2, 120)); // keep more, then sort again later
+  rows = rows.slice(0, Math.max(lim * 2, 120));
 
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
   rows = finalizeRows(withInd);
@@ -976,16 +907,14 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
 }
 
 // ============================================================================
-// SECTION 12 — API Routes
+// SECTION 11 — API Routes
 // ============================================================================
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: `${BRAND.legal} running ✅`,
     ui: "/ui",
-    snapshotAllEnabled: ENABLE_SNAPSHOT_ALL,
-    amWsEnabled: ENABLE_AM_WS,
-    endpoints: ["/ui", "/list", "/scan", "/snapshot-all", "/premarket", "/aftermarket", "/halts", "/api", "/dividends"],
+    endpoints: ["/list", "/scan", "/snapshot-all", "/premarket", "/aftermarket", "/halts", "/api", "/dividends"],
   });
 });
 
@@ -994,16 +923,13 @@ app.get("/api", (req, res) => {
     ok: true,
     config: {
       port: PORT,
-      enableSnapshotAll: ENABLE_SNAPSHOT_ALL,
-      enableAmWs: ENABLE_AM_WS,
-      enableHaltWs: ENABLE_HALT_WS,
-      enable5mIndicators: ENABLE_5M_INDICATORS,
-      snapConcurrency: SNAP_CONCURRENCY,
-      includeOtc: INCLUDE_OTC,
-      wsUrl: MASSIVE_WS_URL,
+      snapshotAllEnabled: ENABLE_SNAPSHOT_ALL,
+      indicators5m: ENABLE_5M_INDICATORS,
+      haltWs: ENABLE_HALT_WS,
+      amWs: ENABLE_AM_WS,
       amSubs: AM_WS_SUBS,
-      amCacheSize: amMap.size,
-      snapCacheSize: amSnapCache.size,
+      amCache: amMap.size,
+      snapCache: amSnapCache.size,
     },
     envMissingCore: envMissingFor({ needSnapshotAll: false, needAggs: false }),
     envMissingIfSnapshotAll: envMissingFor({ needSnapshotAll: true, needAggs: false }),
@@ -1017,7 +943,6 @@ app.get("/scan", async (req, res) => {
     if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
     const symbols = parseSymbols(req.query.symbols || "NVDA,TSLA,AAPL").slice(0, 100);
-
     const snaps = await mapPool(symbols, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
       return { ticker: t, ...r };
@@ -1026,8 +951,7 @@ app.get("/scan", async (req, res) => {
     const good = snaps.filter((x) => x.ok);
     const bad = snaps.filter((x) => !x.ok);
 
-    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
-    rows = rows.map(addExtPctFromPrevClose);
+    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
 
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
     rows = finalizeRows(withInd);
@@ -1065,7 +989,7 @@ app.get("/list", async (req, res) => {
     const movers = await fetchMovers(direction);
     if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
 
-    // widen universe so cap filter doesn't go empty
+    // widen for cap filtering
     const tickers = movers.rows
       .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
       .filter(Boolean)
@@ -1079,11 +1003,11 @@ app.get("/list", async (req, res) => {
     const good = snaps.filter((x) => x.ok);
     const bad = snaps.filter((x) => !x.ok);
 
-    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data));
-    rows = rows.map(addExtPctFromPrevClose);
+    let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
     rows = rows.filter((r) => capPass(r, cap));
 
     if (minGap !== null && Number.isFinite(minGap)) rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
+
     rows = rows.slice(0, limit);
 
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
@@ -1117,13 +1041,11 @@ app.get("/premarket", async (req, res) => {
   const cap = String(req.query.cap || "all").toLowerCase();
   const limit = req.query.limit;
 
-  // Snapshot-All ON -> use Snapshot-All
   if (ENABLE_SNAPSHOT_ALL) {
     const out = await buildRowsFromSnapshotAll({ cap, limit, session: "pre" });
     return res.status(out.status).json(out.body);
   }
 
-  // Snapshot-All OFF -> AM fallback
   const out = await buildRowsFromAMCache({ cap, limit, session: "pre" });
   return res.status(out.status).json(out.body);
 });
@@ -1153,9 +1075,7 @@ app.get("/dividends", async (req, res) => {
     const params = { limit: String(limit), order, sort };
     if (ticker) params.ticker = ticker;
 
-    const headers = {};
-    const a = auth(params, headers);
-
+    const a = auth(params, {});
     const r = await safeGet(url, { params: a.params, headers: a.headers });
 
     const rows =
@@ -1170,7 +1090,7 @@ app.get("/dividends", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 13 — UI (simple but works)
+// SECTION 12 — UI (simple)
 // ============================================================================
 function renderUI(preset = {}) {
   const presetGroup = preset.group || "topGainers";
@@ -1222,6 +1142,7 @@ tr:hover td{background:rgba(255,255,255,.03)}
       </div>
       <div class="badge" id="status">Idle</div>
     </div>
+
     <div class="nav">
       <a href="/ui" style="${active("/ui")}">Dashboard</a>
       <a href="/ui/gainers" style="${active("/ui/gainers")}">Gainers</a>
@@ -1273,10 +1194,10 @@ tr:hover td{background:rgba(255,255,255,.03)}
       <button id="runBtn">Run</button>
     </div>
 
-    <div class="banner" id="bannerSnap">⚠️ Snapshot-All OFF → Pre/After dùng AM WS fallback (cap filter sẽ “best effort”).</div>
+    <div class="banner" id="bannerSnap">⚠️ Snapshot-All OFF → Pre/After uses AM WS fallback + snapshot enrich.</div>
 
     <div class="note">
-      Click ticker opens TradingView (new tab). Columns show Score + VWAP/VolSpike (if indicators enabled).
+      Click ticker opens TradingView. Columns show Score + VWAP/VolSpike (if indicators enabled).
     </div>
   </div>
 </div>
@@ -1402,26 +1323,21 @@ function applyAuto(){
   const s = Math.max(5, Math.min(3600, Number.isFinite(sec)?sec:30));
   if (timer) clearInterval(timer);
   timer = null;
-  if (on){
-    timer = setInterval(run, s*1000);
-  }
+  if (on) timer = setInterval(run, s*1000);
 }
 
 byId("runBtn").addEventListener("click", run);
 byId("autoOn").addEventListener("change", applyAuto);
 byId("autoSec").addEventListener("change", applyAuto);
 
-if (!SNAPSHOT_ALL_ENABLED) {
-  byId("bannerSnap").style.display = "block";
-}
-
+if (!SNAPSHOT_ALL_ENABLED) byId("bannerSnap").style.display = "block";
 run();
 </script>
 </body>
 </html>`;
 }
 
-// UI pages with presets
+// UI routes (presets)
 app.get("/ui", (req, res) => res.type("html").send(renderUI({ path: "/ui", group: "topGainers", cap: "all", limit: 80 })));
 app.get("/ui/gainers", (req, res) => res.type("html").send(renderUI({ path: "/ui/gainers", group: "topGainers", cap: "all", limit: 80 })));
 app.get("/ui/losers", (req, res) => res.type("html").send(renderUI({ path: "/ui/losers", group: "topLosers", cap: "all", limit: 80 })));
@@ -1434,7 +1350,7 @@ app.get("/ui/aftermarket", (req, res) => res.type("html").send(renderUI({ path: 
 app.get("/ui/snapshot-all", (req, res) => res.type("html").send(renderUI({ path: "/ui/snapshot-all", group: "snapshotAll", cap: "all", limit: 200 })));
 
 // ============================================================================
-// SECTION 14 — Listen + start WS
+// SECTION 13 — Listen + start WS
 // ============================================================================
 startHaltWebSocket();
 startAMWebSocket();
@@ -1447,6 +1363,6 @@ app.listen(PORT, () => {
   console.log(`🌙 After: ${base}/ui/aftermarket`);
   console.log(`⛔ Halts: ${base}/halts`);
   console.log(`ℹ️ API: ${base}/api`);
-  if (!ENABLE_SNAPSHOT_ALL) console.log(`⚠️ Snapshot-All OFF → Pre/After uses AM WS fallback`);
+  if (!ENABLE_SNAPSHOT_ALL) console.log(`⚠️ Snapshot-All OFF → Pre/After uses AM WS fallback + enrich`);
   console.log("");
 });

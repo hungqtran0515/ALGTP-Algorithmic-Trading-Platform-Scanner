@@ -49,7 +49,7 @@ const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
 const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim(); // query | xapi | bearer
 const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
-
+const UI_AUTO_REFRESH_MS = Math.max(0, Math.min(600000, Number(process.env.UI_AUTO_REFRESH_MS || 15000))); // 0 = off
 const MASSIVE_MOVER_URL = String(
   process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
 ).trim();
@@ -1664,9 +1664,70 @@ function setPreset(){
   byId("limit").value = String(PRESET.limit);
   byId("minGap").value = PRESET.minGap ?? "";
 }
-byId("runBtn").addEventListener("click", run);
+byId("runBtn").addEventListener("click", () => {
+  userInteracted = true;
+  run();
+});
+
 setPreset();
 run();
+
+// =======================
+// AUTO REFRESH (no reload)
+// =======================
+let autoTimer = null;
+let tickTimer = null;
+let userInteracted = false;
+
+const AUTO_MS_DEFAULT = Number(${UI_AUTO_REFRESH_MS}); // injected from server env
+let autoMs = Number.isFinite(AUTO_MS_DEFAULT) ? AUTO_MS_DEFAULT : 15000;
+let autoEnabled = autoMs > 0;
+
+function riskIsOpen(){
+  const back = document.getElementById("riskBack");
+  return back && back.style.display === "flex";
+}
+
+function setStatusAuto(extra){
+  // status pill: "OK (...) • Auto: 15s"
+  const sec = Math.max(1, Math.round(autoMs/1000));
+  statusPill.textContent = extra ? `${extra} • Auto: ${sec}s` : `Auto: ${sec}s`;
+}
+
+function startAuto(){
+  stopAuto();
+  if (!autoEnabled || autoMs <= 0) return;
+
+  // countdown tick in pill
+  let remain = autoMs;
+  tickTimer = setInterval(() => {
+    if (!autoEnabled || riskIsOpen()) return;
+    remain -= 1000;
+    if (remain < 0) remain = autoMs;
+    const sec = Math.max(0, Math.round(remain/1000));
+    // giữ text OK nếu có
+    const base = statusPill.textContent.split("•")[0].trim();
+    statusPill.textContent = `${base} • Auto in ${sec}s`;
+  }, 1000);
+
+  autoTimer = setInterval(async () => {
+    if (!autoEnabled) return;
+    if (riskIsOpen()) return;            // không refresh khi risk popup đang mở
+    if (miniBox && miniBox.style.display === "block") return; // đang hover mini chart thì thôi (tránh lag)
+    await run();
+  }, autoMs);
+}
+
+function stopAuto(){
+  if (autoTimer) clearInterval(autoTimer);
+  if (tickTimer) clearInterval(tickTimer);
+  autoTimer = null;
+  tickTimer = null;
+}
+
+// Auto start
+startAuto();
+
 </script>
 </body>
 </html>`;

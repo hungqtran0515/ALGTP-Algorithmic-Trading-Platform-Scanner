@@ -1691,7 +1691,7 @@ function riskIsOpen(){
 function setStatusAuto(extra){
   // status pill: "OK (...) • Auto: 15s"
   const sec = Math.max(1, Math.round(autoMs/1000));
-  statusPill.textContent = extra ? `${extra} • Auto: ${sec}s` : `Auto: ${sec}s`;
+  statusPill.textContent = extra ? \`\${extra} • Auto: \${sec}s\` : \`Auto: \${sec}s\`;
 }
 
 function startAuto(){
@@ -1707,7 +1707,7 @@ function startAuto(){
     const sec = Math.max(0, Math.round(remain/1000));
     // giữ text OK nếu có
     const base = statusPill.textContent.split("•")[0].trim();
-    statusPill.textContent = `${base} • Auto in ${sec}s`;
+    statusPill.textContent = \`\${base} • Auto in \${sec}s\`;
   }, 1000);
 
   autoTimer = setInterval(async () => {

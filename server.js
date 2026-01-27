@@ -1623,8 +1623,13 @@ app.get("/mini-chart", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 12 — API Routes
+// SECTION 12 — API Routes  ✅ (FIXED)
+// Fixes included:
+// 1) /list topGappers minGap filter happens AFTER Polygon gap overwrite (enrichRowsWithDailyOpen)
+// 2) /list uses better “topGappers universe”: gainers + losers union (so gappers don’t miss losers)
+// 3) /movers-premarket & /movers-afterhours rely on buildRowsFromMoversUnionBySession (already fixed in SECTION 10)
 // ============================================================================
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -1667,10 +1672,14 @@ app.get("/api", (req, res) => {
       polygonApiKeyPresent: Boolean(POLYGON_API_KEY),
       floatEnrichEnabled: ENABLE_FLOAT_ENRICH,
       financialModelingPrepApiKeyPresent: Boolean(FMP_API_KEY),
+      strictSessionFilter: typeof STRICT_SESSION_FILTER === "boolean" ? STRICT_SESSION_FILTER : undefined,
     },
   });
 });
 
+// --------------------------------------------------------------------------
+// /scan — scan YOUR symbols list only (IMPORTANT_SYMBOLS or query symbols=)
+// --------------------------------------------------------------------------
 app.get("/scan", async (req, res) => {
   try {
     const miss = envMissingFor({ needAggs: ENABLE_5M_INDICATORS });
@@ -1699,10 +1708,10 @@ app.get("/scan", async (req, res) => {
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
 
-    // Overwrite open/prevClose/gapPct using Polygon daily aggregates (Regular Trading Hours open / previous close)
+    // ✅ Gap% overwrite (Polygon RTH open/prevClose)
     rows = await enrichRowsWithDailyOpen(rows, 200);
 
-    // Enrich float using Financial Modeling Prep shares-float
+    // ✅ Float enrich (FMP)
     rows = await enrichRowsWithFloat(rows, 200);
 
     const badRows = bad.map((x) => ({
@@ -1730,7 +1739,11 @@ app.get("/scan", async (req, res) => {
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
     rows = finalizeRows(withInd);
 
-    rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) || Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+    rows.sort(
+      (a, b) =>
+        Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
+        Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0)
+    );
 
     res.json({
       ok: true,
@@ -1738,7 +1751,12 @@ app.get("/scan", async (req, res) => {
       scanned: symbols.length,
       results: rows,
       snapshotErrors: DEBUG
-        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
+        ? bad.slice(0, 10).map((x) => ({
+            ticker: x.ticker,
+            status: x.status,
+            url: x.url,
+            errorDetail: x.errorDetail,
+          }))
         : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
@@ -1747,6 +1765,11 @@ app.get("/scan", async (req, res) => {
   }
 });
 
+// --------------------------------------------------------------------------
+// /list — groups: topGainers | topLosers | topGappers
+// ✅ FIX: for topGappers, we use gainers+losers union universe
+// ✅ FIX: minGap filter runs AFTER Polygon gap overwrite
+// --------------------------------------------------------------------------
 app.get("/list", async (req, res) => {
   try {
     const miss = envMissingFor({ needAggs: ENABLE_5M_INDICATORS });
@@ -1756,17 +1779,36 @@ app.get("/list", async (req, res) => {
     const cap = String(req.query.cap || "all").trim().toLowerCase();
     const limit = clamp(Number(req.query.limit || 50), 5, 200);
     const minGap = n(req.query.minGap);
+    const minGapAbs = String(req.query.minGapAbs || "false").toLowerCase() === "true"; // optional: abs filter
 
-    const direction = groupToDirection(group);
-    const movers = await fetchMovers(direction);
-    if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
+    // Build ticker universe:
+    // - topGainers => gainers only
+    // - topLosers  => losers only
+    // - topGappers => union (gainers + losers) so you don't miss down-gappers
+    let universeTickers = [];
 
-    const tickers = movers.rows
-      .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
-      .filter(Boolean)
-      .slice(0, limit * 3);
+    if (group === "topGappers") {
+      const g = await fetchMovers("gainers");
+      const l = await fetchMovers("losers");
+      if (!g.ok && !l.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: { g, l } });
 
-    const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+      const pool = [...(g.ok ? g.rows : []), ...(l.ok ? l.rows : [])]
+        .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+        .filter(Boolean);
+
+      universeTickers = Array.from(new Set(pool)).slice(0, limit * 6);
+    } else {
+      const direction = groupToDirection(group);
+      const movers = await fetchMovers(direction);
+      if (!movers.ok) return res.status(500).json({ ok: false, error: "Movers failed", moverDebug: movers });
+
+      universeTickers = movers.rows
+        .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+        .filter(Boolean)
+        .slice(0, limit * 3);
+    }
+
+    const snaps = await mapPool(universeTickers, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
       return { ticker: t, ...r };
     });
@@ -1775,19 +1817,29 @@ app.get("/list", async (req, res) => {
     const bad = snaps.filter((x) => !x.ok);
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
+
+    // cap filter first
     rows = rows.filter((r) => capPass(r, cap));
 
+    // ✅ IMPORTANT FIX: overwrite Gap% using Polygon FIRST
+    rows = await enrichRowsWithDailyOpen(rows, 200);
+
+    // ✅ then apply minGap filter using correct gapPct
     if (minGap !== null && Number.isFinite(minGap) && group === "topGappers") {
-      rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
+      if (minGapAbs) rows = rows.filter((r) => Math.abs(r.gapPct ?? 0) >= minGap);
+      else rows = rows.filter((r) => (r.gapPct ?? 0) >= minGap);
     }
 
-    rows = rows.slice(0, limit);
-
-    rows = await enrichRowsWithDailyOpen(rows, 200);
+    // float enrich
     rows = await enrichRowsWithFloat(rows, 200);
+
+    // now cut to limit
+    rows = rows.slice(0, limit);
 
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
     rows = finalizeRows(withInd);
+
+    // final sort based on group
     sortRowsByGroup(rows, group);
 
     res.json({
@@ -1796,9 +1848,16 @@ app.get("/list", async (req, res) => {
       group,
       cap,
       limitRequested: limit,
+      minGap: group === "topGappers" ? minGap : undefined,
+      minGapAbs: group === "topGappers" ? minGapAbs : undefined,
       results: rows,
       snapshotErrors: DEBUG
-        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
+        ? bad.slice(0, 10).map((x) => ({
+            ticker: x.ticker,
+            status: x.status,
+            url: x.url,
+            errorDetail: x.errorDetail,
+          }))
         : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
@@ -1807,6 +1866,9 @@ app.get("/list", async (req, res) => {
   }
 });
 
+// --------------------------------------------------------------------------
+// Snapshot-all + sessions
+// --------------------------------------------------------------------------
 app.get("/snapshot-all", async (req, res) => {
   const cap = String(req.query.cap || "all").toLowerCase();
   const limit = req.query.limit;
@@ -1840,12 +1902,21 @@ app.get("/aftermarket", async (req, res) => {
   return res.status(out.status).json(out.body);
 });
 
-// Movers Premarket / After-hours (Massive Movers list is the fastest source) with ranking by Gap% + Float Turnover %
+// --------------------------------------------------------------------------
+// Movers Premarket / After-hours (Massive Movers list is the fastest fragment)
+// Ranking: Gap% (abs) desc -> FloatTurnover% desc -> Volume desc
+// --------------------------------------------------------------------------
 app.get("/movers-premarket", async (req, res) => {
   try {
     const limit = clamp(Number(req.query.limit || 120), 10, 500);
     const rows = await buildRowsFromMoversUnionBySession({ session: "pre", limit });
-    res.json({ ok: true, session: "premarket", source: "massive_movers_list", rank: "gap_percent_then_float_turnover_percent_then_volume", results: rows });
+    res.json({
+      ok: true,
+      session: "premarket",
+      source: "massive_movers_list",
+      rank: "gap_percent_then_float_turnover_percent_then_volume",
+      results: rows,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: "movers-premarket failed", detail: String(e?.message || e) });
   }
@@ -1855,13 +1926,21 @@ app.get("/movers-afterhours", async (req, res) => {
   try {
     const limit = clamp(Number(req.query.limit || 120), 10, 500);
     const rows = await buildRowsFromMoversUnionBySession({ session: "after", limit });
-    res.json({ ok: true, session: "afterhours", source: "massive_movers_list", rank: "gap_percent_then_float_turnover_percent_then_volume", results: rows });
+    res.json({
+      ok: true,
+      session: "afterhours",
+      source: "massive_movers_list",
+      rank: "gap_percent_then_float_turnover_percent_then_volume",
+      results: rows,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: "movers-afterhours failed", detail: String(e?.message || e) });
   }
 });
 
-// Most Active / Unusual Volume / Most Volatile / Most Lately
+// --------------------------------------------------------------------------
+// Most Active / Most Volatile / Most Lately / Unusual Volume
+// --------------------------------------------------------------------------
 app.get("/most-active", async (req, res) => {
   const cap = String(req.query.cap || "all").toLowerCase();
   const limit = req.query.limit;

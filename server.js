@@ -1517,7 +1517,6 @@ async function buildRowsFromMoversUnionBySession({ session, limit = 120 } = {}) 
   return rows.slice(0, lim);
 }
 
-
 // ============================================================================
 // SECTION 11 — Mini Chart endpoint (hover)
 // ============================================================================

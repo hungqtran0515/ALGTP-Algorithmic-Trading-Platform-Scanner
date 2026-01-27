@@ -1128,50 +1128,102 @@ async function enrichRowsWithDailyOpen(rows, maxN = 200) {
 }
 
 // ============================================================================
-// SECTION 10 — Builders + sorting (including Movers ranking by Gap% + Float Turnover %)
+// SECTION 10 — Builders + Sorting
+// - Movers ranking uses Gap% (Regular Trading Hours) + Float Turnover Percent + Volume
+// - Gap% is overwritten later by Polygon daily aggregates (Regular Trading Hours open / previous close)
+// - Float is enriched later by Financial Modeling Prep shares-float
+// - Float Turnover Percent = (Volume / FloatShares) * 100
+// - IMPORTANT FIX: when snapshot timestamp is missing, we DO NOT drop the ticker
 // ============================================================================
+
 function finalizeRows(rows) {
+  // Attach score + icons + halt flag + float turnover percent
   let out = rows.map((r) => {
     const d = demandScore(r);
-    return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
+    return {
+      ...r,
+      demandScore: d,
+      signalIcon: signalIcon(d),
+      paIcon: r.paIcon || "",
+    };
   });
+
   out = out.map(attachHaltFlag);
   out = out.map(addFloatTurnoverPct);
+
   return out;
 }
 
-function prelimScoreVolatile(r) {
-  const a = Math.abs(n(r?.gapPct) ?? 0);
-  const b = Math.abs(n(r?.pricePct) ?? 0);
-  const c = Math.abs(n(r?.extPct) ?? 0);
-  return Math.max(a, b, c);
+function prelimScoreVolatile(row) {
+  // Volatility score uses the largest absolute move among:
+  // - GapPercent
+  // - PricePercent
+  // - ExtendedHoursPercent
+  const gapAbs = Math.abs(n(row?.gapPct) ?? 0);
+  const priceAbs = Math.abs(n(row?.pricePct) ?? 0);
+  const extAbs = Math.abs(n(row?.extPct) ?? 0);
+  return Math.max(gapAbs, priceAbs, extAbs);
 }
 
 function sortForPrepick(rows, mode) {
+  // Used to reduce universe size BEFORE indicators to save API calls
   const safeN = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
-  if (mode === "active") return [...rows].sort((a, b) => safeN(b.volume) - safeN(a.volume));
-  if (mode === "volatile") return [...rows].sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || safeN(b.volume) - safeN(a.volume));
-  if (mode === "gap") return [...rows].sort((a, b) => Math.abs(safeN(b.gapPct)) - Math.abs(safeN(a.gapPct)) || safeN(b.volume) - safeN(a.volume));
-  if (mode === "gapFloatRank")
-    return [...rows].sort((a, b) =>
-      Math.abs(safeN(b.gapPct)) - Math.abs(safeN(a.gapPct)) ||
-      safeN(b.floatTurnoverPct) - safeN(a.floatTurnoverPct) ||
-      safeN(b.volume) - safeN(a.volume)
+
+  if (mode === "active") {
+    return [...rows].sort((a, b) => safeN(b.volume) - safeN(a.volume));
+  }
+
+  if (mode === "volatile") {
+    return [...rows].sort(
+      (a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || safeN(b.volume) - safeN(a.volume)
     );
+  }
+
+  if (mode === "gap") {
+    return [...rows].sort(
+      (a, b) => Math.abs(safeN(b.gapPct)) - Math.abs(safeN(a.gapPct)) || safeN(b.volume) - safeN(a.volume)
+    );
+  }
+
+  if (mode === "gapFloatRank") {
+    // Movers special rank: Gap% (abs) desc -> FloatTurnoverPercent desc -> Volume desc
+    return [...rows].sort((a, b) => {
+      const aGap = Math.abs(safeN(a.gapPct));
+      const bGap = Math.abs(safeN(b.gapPct));
+
+      const aFloatTurn = safeN(a.floatTurnoverPct);
+      const bFloatTurn = safeN(b.floatTurnoverPct);
+
+      const aVol = safeN(a.volume);
+      const bVol = safeN(b.volume);
+
+      return bGap - aGap || bFloatTurn - aFloatTurn || bVol - aVol;
+    });
+  }
+
+  // default: active
   return [...rows].sort((a, b) => safeN(b.volume) - safeN(a.volume));
 }
 
 function sortGapFloatVolume(rows) {
-  // Movers ranking rule:
-  // 1) Highest absolute GapPercent first (Regular Trading Hours gap)
-  // 2) Highest FloatTurnoverPercent next (Volume / FloatShares * 100)
+  // Movers ranking rule (most important for "mover"):
+  // 1) Highest absolute GapPercent first (GapPercent is Regular Trading Hours gap after Polygon overwrite)
+  //    GapPercent = ((RegularTradingHoursOpen - PreviousClose) / PreviousClose) * 100
+  // 2) Highest FloatTurnoverPercent next
+  //    FloatTurnoverPercent = (Volume / FloatShares) * 100
   // 3) Highest Volume last
-  rows.sort(
-    (a, b) =>
-      Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
-      (b.floatTurnoverPct ?? 0) - (a.floatTurnoverPct ?? 0) ||
-      (b.volume ?? 0) - (a.volume ?? 0)
-  );
+  rows.sort((a, b) => {
+    const gapA = Math.abs(n(a?.gapPct) ?? 0);
+    const gapB = Math.abs(n(b?.gapPct) ?? 0);
+
+    const floatTurnA = n(a?.floatTurnoverPct) ?? 0;
+    const floatTurnB = n(b?.floatTurnoverPct) ?? 0;
+
+    const volA = n(a?.volume) ?? 0;
+    const volB = n(b?.volume) ?? 0;
+
+    return gapB - gapA || floatTurnB - floatTurnA || volB - volA;
+  });
 }
 
 async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = null, sortMode = "gap" } = {}) {
@@ -1179,7 +1231,11 @@ async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = nu
     return {
       ok: false,
       status: 403,
-      body: { ok: false, error: "Snapshot-All is OFF", hint: "Set ENABLE_SNAPSHOT_ALL=true or use WebSocket fallback." },
+      body: {
+        ok: false,
+        error: "Snapshot-All is OFF",
+        hint: "Set ENABLE_SNAPSHOT_ALL=true or use WebSocket fallback (AM cache).",
+      },
     };
   }
 
@@ -1189,12 +1245,14 @@ async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = nu
   const snap = await fetchSnapshotAll();
   if (!snap.ok) return { ok: false, status: 500, body: { ok: false, error: "Snapshot-all failed", debug: snap } };
 
+  // Build map ticker -> raw snapshot object
   const snapMap = new Map();
   for (const x of snap.rows) {
     const t = String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase();
     if (t) snapMap.set(t, x);
   }
 
+  // Normalize to standard row objects
   let rows = [];
   for (const [ticker, raw] of snapMap.entries()) {
     let r = normalizeSnapshotAuto(ticker, raw);
@@ -1202,11 +1260,16 @@ async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = nu
     rows.push(r);
   }
 
+  // Session filter:
+  // IMPORTANT: if timestamp missing, do not drop (keep the ticker).
   if (session) {
     rows = rows.filter((r) => {
       const raw = snapMap.get(r.symbol);
       const ms = extractSnapshotTimestampMs(raw);
-      if (!ms) return false;
+
+      // If we cannot determine timestamp, keep it (better than losing movers).
+      if (!ms) return true;
+
       return sessionOfMs(ms) === session;
     });
   }
@@ -1219,18 +1282,23 @@ async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = nu
   // Enrich float using Financial Modeling Prep shares-float
   rows = await enrichRowsWithFloat(rows, 200);
 
+  // Reduce before indicators
   const lim = clamp(Number(limit || 120), 10, 500);
   const prepickN = Math.max(250, lim * 5);
   rows = sortForPrepick(rows, sortMode).slice(0, prepickN);
 
+  // Indicators
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
   rows = finalizeRows(withInd);
 
-  // final sort
-  if (sortMode === "active") rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
-  else if (sortMode === "volatile") rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
-  else if (sortMode === "gapFloatRank") sortGapFloatVolume(rows);
-  else {
+  // Final sort
+  if (sortMode === "active") {
+    rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  } else if (sortMode === "volatile") {
+    rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
+  } else if (sortMode === "gapFloatRank") {
+    sortGapFloatVolume(rows);
+  } else {
     rows.sort(
       (a, b) =>
         Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
@@ -1257,6 +1325,7 @@ async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = nu
 }
 
 async function buildRowsFromAMCache({ cap = "all", limit = 120, session = null, sortMode = "gap" } = {}) {
+  // Base from AM WebSocket cache
   let base = [];
   for (const [sym, am] of amMap.entries()) {
     const ms = toMs(am?.e) || toMs(am?.s);
@@ -1270,9 +1339,12 @@ async function buildRowsFromAMCache({ cap = "all", limit = 120, session = null, 
   }
 
   const lim = clamp(Number(limit || 120), 10, 500);
+
+  // Pick top candidates to enrich by snapshot (limit REST load)
   const candidates = sortForPrepick(base, sortMode);
   const pick = candidates.slice(0, AM_ENRICH_LIMIT).map((x) => x.symbol);
 
+  // Fetch snapshots for missing ones
   const toFetch = pick.filter((sym) => !getSnapCached(sym));
   if (toFetch.length) {
     const snaps = await mapPool(toFetch, SNAP_CONCURRENCY, async (t) => {
@@ -1284,6 +1356,7 @@ async function buildRowsFromAMCache({ cap = "all", limit = 120, session = null, 
     }
   }
 
+  // Merge AM + Snapshot (best-effort)
   let rows = base.map((r) => {
     const snapRow = getSnapCached(r.symbol);
     return snapRow ? mergeAMWithSnapshot(r, snapRow) : r;
@@ -1297,16 +1370,20 @@ async function buildRowsFromAMCache({ cap = "all", limit = 120, session = null, 
   // Enrich float using Financial Modeling Prep shares-float
   rows = await enrichRowsWithFloat(rows, 200);
 
+  // Reduce before indicators
   rows = sortForPrepick(rows, sortMode).slice(0, Math.max(200, lim * 4));
 
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
   rows = finalizeRows(withInd);
 
-  // final sort
-  if (sortMode === "active") rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
-  else if (sortMode === "volatile") rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
-  else if (sortMode === "gapFloatRank") sortGapFloatVolume(rows);
-  else {
+  // Final sort
+  if (sortMode === "active") {
+    rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  } else if (sortMode === "volatile") {
+    rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
+  } else if (sortMode === "gapFloatRank") {
+    sortGapFloatVolume(rows);
+  } else {
     rows.sort(
       (a, b) =>
         Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
@@ -1333,6 +1410,8 @@ async function buildRowsFromAMCache({ cap = "all", limit = 120, session = null, 
 }
 
 async function buildRowsFromMoversUnion({ cap = "all", limit = 120, sortMode = "active" } = {}) {
+  // Universe fallback when snapshot-all is OFF:
+  // Use Massive movers list (gainers + losers) -> fetch snapshots -> normalize -> enrich -> rank
   const lim = clamp(Number(limit || 120), 10, 500);
 
   const g = await fetchMovers("gainers");
@@ -1357,6 +1436,7 @@ async function buildRowsFromMoversUnion({ cap = "all", limit = 120, sortMode = "
   rows = await enrichRowsWithDailyOpen(rows, 200);
   rows = await enrichRowsWithFloat(rows, 200);
 
+  // Reduce before indicators
   rows = sortForPrepick(rows, sortMode).slice(0, Math.max(250, lim * 5));
 
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
@@ -1383,12 +1463,12 @@ async function buildRowsFromMoversUnion({ cap = "all", limit = 120, sortMode = "
 }
 
 async function buildRowsFromMoversUnionBySession({ session, limit = 120 } = {}) {
-  // Use Massive Movers list as the fastest "fragment":
+  // Movers list is the fastest data fragment:
   // 1) Massive movers list -> candidate tickers
   // 2) Massive ticker snapshot -> normalize
-  // 3) Polygon daily aggregates -> overwrite Regular Trading Hours open / previous close -> compute Gap%
+  // 3) Polygon daily aggregates -> overwrite Regular Trading Hours open and previous close -> compute Gap%
   // 4) Financial Modeling Prep shares-float -> enrich Float -> compute Float Turnover Percent
-  // 5) Rank: Gap% highest first, Float Turnover Percent highest next
+  // 5) Rank: highest absolute Gap% first, then highest Float Turnover Percent, then Volume
 
   const lim = clamp(Number(limit || 120), 10, 500);
 
@@ -1413,11 +1493,16 @@ async function buildRowsFromMoversUnionBySession({ session, limit = 120 } = {}) 
     .map((x) => normalizeSnapshotAuto(x.ticker, x.data))
     .map(addExtPctFromPrevClose);
 
-  // filter by session using snapshot timestamp
+  // ✅ CRITICAL FIX:
+  // When timestamp is missing in snapshot, DO NOT drop the mover.
+  // If timestamp exists, use it to filter by requested session.
   rows = rows.filter((r) => {
     const raw = snapDataMap.get(r.symbol);
     const ms = extractSnapshotTimestampMs(raw);
-    if (!ms) return false;
+
+    // Missing timestamp → keep it (this prevents empty movers)
+    if (!ms) return true;
+
     return sessionOfMs(ms) === session;
   });
 
@@ -1431,6 +1516,7 @@ async function buildRowsFromMoversUnionBySession({ session, limit = 120 } = {}) 
 
   return rows.slice(0, lim);
 }
+
 
 // ============================================================================
 // SECTION 11 — Mini Chart endpoint (hover)

@@ -1685,7 +1685,8 @@ app.get("/scan", async (req, res) => {
     const miss = envMissingFor({ needAggs: ENABLE_5M_INDICATORS });
     if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
-    const ALL = parseSymbols(req.query.symbols || IMPORTANT_SYMBOLS);
+    const ALL = parseSymbols(req.query.symbols || req.query.symbol || IMPORTANT_SYMBOLS);
+
 
     const MAX_FROM_UI = Number(req.query.max);
     const ENV_MAX = Number(process.env.SCAN_MAX_SYMBOLS || SCAN_MAX_SYMBOLS);
@@ -2020,7 +2021,7 @@ app.get("/unusual-volume", async (req, res) => {
 });
 
 // ============================================================================
-// SECTION 13 — UI (Dashboard)
+// SECTION 13 — UI (Dashboard) ✅ FULL REWRITE + FIXED
 // ============================================================================
 function riskNoticeContent() {
   return {
@@ -2050,7 +2051,7 @@ function renderUI() {
   const autoSec = Math.max(1, Math.round(autoMs / 1000));
 
   const snapAllOn = ENABLE_SNAPSHOT_ALL ? "ON" : "OFF";
-  const vwapOn = ENABLE_5M_INDICATORS ? "ON" : "OFF";
+  const indOn = ENABLE_5M_INDICATORS ? "ON" : "OFF";
 
   const envMax = Number(process.env.SCAN_MAX_SYMBOLS || SCAN_MAX_SYMBOLS);
   const hardMax = Number(process.env.SCAN_HARD_MAX || SCAN_HARD_MAX);
@@ -2074,16 +2075,8 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
 .brandName{ font-weight:900; font-size:13px; letter-spacing:.3px; }
 .brandSub{ font-size:12px; color:#a7adc2; margin-top:3px; }
 
-.pill{
-  font-size:12px; padding:7px 12px; border-radius:999px;
-  background:#121622; border:1px solid rgba(255,255,255,.12);
-  color:#c8cde0; white-space:nowrap;
-}
-.tag{
-  font-size:12px; padding:7px 12px; border-radius:999px;
-  background:#121622; border:1px solid rgba(255,255,255,.12);
-  color:#c8cde0; white-space:nowrap;
-}
+.pill{ font-size:12px; padding:7px 12px; border-radius:999px; background:#121622; border:1px solid rgba(255,255,255,.12); color:#c8cde0; white-space:nowrap; }
+.tag{ font-size:12px; padding:7px 12px; border-radius:999px; background:#121622; border:1px solid rgba(255,255,255,.12); color:#c8cde0; white-space:nowrap; }
 
 .panel{ border-bottom:1px solid rgba(255,255,255,.06); padding:10px 0 12px; }
 .hint{ font-size:12px; color:#a7adc2; margin-top:8px; line-height:1.4; }
@@ -2276,7 +2269,7 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
       <div class="right">
         <span class="pill" id="statusPill">Dashboard</span>
         <span class="pill">Snapshot-All: <b>${snapAllOn}</b></span>
-        <span class="pill">Indicators: <b>${vwapOn}</b></span>
+        <span class="pill">Indicators: <b>${indOn}</b></span>
       </div>
     </div>
 
@@ -2289,8 +2282,7 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
     </div>
 
     <div class="hint">
-      Movers boxes rank: highest absolute Gap% first, then highest Float Turnover %, then Volume.
-      Gap% uses Polygon Regular Trading Hours open and previous close. Float uses Financial Modeling Prep shares-float.
+      TradingView click FIXED: no forced NASDAQ prefix. Movers ranked by Gap% + Float Turnover%.
     </div>
 
     <div class="err" id="errBox"></div>
@@ -2378,8 +2370,9 @@ function fmtInt(x){
   return Math.round(nn).toLocaleString();
 }
 
+// ✅ TradingView URL FIX: do NOT force "NASDAQ:" prefix
 function tvUrlFor(sym){
-  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent("NASDAQ:" + sym) + "&interval=5";
+  return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(sym) + "&interval=5";
 }
 window.handleTickerClick = function(ev, sym){
   window.open(tvUrlFor(sym), "_blank", "noopener,noreferrer");
@@ -2470,12 +2463,12 @@ function bindMiniHover(){
   });
 }
 
-// ===== Dashboard sections =====
+// ===== Dashboard state =====
 let importantSymbols = byId("symbols").value || "";
 let scanMax = Number(byId("maxSymbols").value || 200);
-
 const REFRESH_MS = ${UI_AUTO_REFRESH_MS};
 
+// Boxes
 const SECTIONS = [
   { id:"pm_movers", title:"PREMARKET MOVERS (Gap% + Float Turnover %)", url:"/movers-premarket?limit=200", cols:3, limit:40, sort:"gapFloatRank" },
   { id:"ah_movers", title:"AFTER HOURS MOVERS (Gap% + Float Turnover %)", url:"/movers-afterhours?limit=200", cols:3, limit:40, sort:"gapFloatRank" },
@@ -2485,7 +2478,7 @@ const SECTIONS = [
   { id:"most_active", title:"MOST ACTIVE", url:"/most-active?cap=all&limit=200", cols:3, limit:20, sort:"active" },
   { id:"most_volatile", title:"MOST VOLATILE", url:"/most-volatile?cap=all&limit=200", cols:3, limit:20, sort:"volatile" },
 
-  // IMPORTANT (big) — hide ticker text but keep hover/click
+  // IMPORTANT (big) — hide symbol text but keep hover/click
   { id:"important", title:"IMPORTANT_STOCKS", url:"/scan?symbols="+encodeURIComponent(importantSymbols)+"&max="+encodeURIComponent(scanMax), cols:6, limit:200, sort:"gapDesc", hideSymbol:true },
 
   { id:"halts", title:"HALT (Limit Up / Limit Down)", url:"/halts?only=all", cols:6, limit:120, type:"halts" },
@@ -2508,7 +2501,7 @@ function sortRows(rows, mode){
   const safe = (v)=> (Number.isFinite(Number(v)) ? Number(v) : null);
   if (mode==="gapDesc") return [...rows].sort((a,b)=> (safe(b.gapPct)??-1e18)-(safe(a.gapPct)??-1e18));
   if (mode==="active")  return [...rows].sort((a,b)=> (safe(b.volume)??-1e18)-(safe(a.volume)??-1e18));
-  if (mode==="volatile")return [...rows].sort((a,b)=> (safe(Math.abs(b.gapPct??0))??-1e18)-(safe(Math.abs(a.gapPct??0))??-1e18));
+  if (mode==="volatile")return [...rows].sort((a,b)=> (Math.abs(safe(b.gapPct)??0))-(Math.abs(safe(a.gapPct)??0)) );
   if (mode==="uv")      return [...rows].sort((a,b)=> (safe(b.volRatio_5m)??-1e18)-(safe(a.volRatio_5m)??-1e18) || (safe(b.volume)??-1e18)-(safe(a.volume)??-1e18));
   if (mode==="gapFloatRank"){
     return [...rows].sort((a,b)=>
@@ -2530,8 +2523,8 @@ function rowsTable(rowsRaw, sec){
         <th>PA</th>
         <th>Symbol</th>
         <th class="right">Price</th>
-        <th class="right">Regular Open</th>
-        <th class="right">Previous Close</th>
+        <th class="right">Open</th>
+        <th class="right">Prev</th>
         <th class="right">Gap%</th>
         <th class="right">VWAP</th>
         <th class="right">Vol</th>
@@ -2645,7 +2638,7 @@ function loadAll(){
   for (const sec of SECTIONS) loadSection(sec);
 }
 
-// ===== Apply changes (symbols + max) =====
+// ===== APPLY IMPORTANT (THIS IS THE LINE YOU COULD NOT FIND) =====
 function applyImportant(){
   const input = byId("symbols");
   const maxInput = byId("maxSymbols");
@@ -2661,7 +2654,9 @@ function applyImportant(){
   const sec = SECTIONS.find(s=>s.id==="important");
   if (!sec) return;
 
+  // ✅ IMPORTANT BOX URL UPDATE (always uses ?symbols= )
   sec.url = "/scan?symbols=" + encodeURIComponent(importantSymbols) + "&max=" + encodeURIComponent(scanMax);
+
   loadSection(sec);
 
   statusPill.textContent = "Updated";
@@ -2733,6 +2728,8 @@ setInterval(()=>{
 }
 
 app.get("/ui", (req, res) => res.type("html").send(renderUI()));
+
+
 
 // ============================================================================
 // SECTION 14 — Start WebSockets + Listen

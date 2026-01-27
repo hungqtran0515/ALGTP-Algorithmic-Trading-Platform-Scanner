@@ -3,15 +3,35 @@
 // Single-file Node.js (ESM)
 // ----------------------------------------------------------------------------
 // UI:  /ui   (Dashboard: Symbols + Max Stepper + Roller + Box matrix)
-// API: /list, /scan, /premarket, /aftermarket, /snapshot-all, /halts, /api
-// Extra: /mini-chart?symbol=AAPL&tf=1   (hover mini chart)
+// API:
+//   /list
+//   /scan
+//   /snapshot-all
+//   /premarket
+//   /aftermarket
+//   /movers-premarket        (Massive movers list -> filter by session -> rank by Gap% + Float Turnover %)
+//   /movers-afterhours       (Massive movers list -> filter by session -> rank by Gap% + Float Turnover %)
+//   /most-active
+//   /unusual-volume
+//   /most-volatile
+//   /most-lately
+//   /halts
+//   /api
+// Extra:
+//   /mini-chart?symbol=AAPL&tf=1   (hover mini chart)
 // ----------------------------------------------------------------------------
-// Premarket/After:
-// - Realtime: AM WS cache (AM.*)  ✅ nhẹ + nhanh
-// - Enrich: REST snapshot + indicators 5m (optional)
-// - Gap% (RTH): Polygon daily aggs open/prevClose (best-effort)
-// - Float: FMP shares-float (best-effort, cached)
-// - AO filter: from 5m aggs (optional)
+// Data priority (most important parts):
+// - Gap% (Regular Trading Hours gap) is computed from Polygon daily aggregates:
+//     GapPercent = ((RegularTradingHoursOpen - PreviousClose) / PreviousClose) * 100
+// - Float is enriched from Financial Modeling Prep "shares-float" endpoint (best-effort).
+// - Float Turnover Percent is computed as:
+//     FloatTurnoverPercent = (Volume / FloatShares) * 100
+// - Movers Premarket / After-hours use Massive Movers list as the fastest "fragment":
+//     1) Massive movers list (fast ticker list)
+//     2) Enrich with Massive ticker snapshot (price/volume/basic fields)
+//     3) Overwrite Gap% using Polygon daily aggregates (Regular Trading Hours open / previous close)
+//     4) Enrich Float using Financial Modeling Prep shares-float
+//     5) Rank: highest absolute Gap% first, then highest Float Turnover Percent, then highest Volume
 // ============================================================================
 
 import "dotenv/config";
@@ -82,11 +102,11 @@ const AM_ENRICH_TTL_MS = Math.max(5000, Math.min(300000, Number(process.env.AM_E
 // Mini chart cache
 const MINI_CACHE_TTL_MS = Math.max(2000, Math.min(120000, Number(process.env.MINI_CACHE_TTL_MS || 15000)));
 
-// Polygon daily open/prevClose for RTH Gap%
+// Polygon daily open/prevClose for Regular Trading Hours Gap%
 const POLYGON_BASE_URL = String(process.env.POLYGON_BASE_URL || "https://api.polygon.io").trim();
 const POLYGON_API_KEY = String(process.env.POLYGON_API_KEY || process.env.MASSIVE_API_KEY || "").trim();
 
-// Float enrich (FMP)
+// Float enrich (Financial Modeling Prep)
 const ENABLE_FLOAT_ENRICH = String(process.env.ENABLE_FLOAT_ENRICH || "false").toLowerCase() === "true";
 const FMP_API_KEY = String(process.env.FMP_API_KEY || "").trim();
 const FLOAT_TTL_MS = Math.max(60_000, Math.min(7 * 86400000, Number(process.env.FLOAT_TTL_MS || 86400000)));
@@ -144,11 +164,13 @@ function round2(x) {
 function clamp(x, a, b) {
   return Math.max(a, Math.min(b, x));
 }
+
 function normalizeSymbolForAPI(sym) {
   const s = String(sym || "").trim().toUpperCase();
   if (!s) return "";
   return SYMBOL_DOT_TO_DASH ? s.replace(/\./g, "-") : s;
 }
+
 function parseSymbols(input) {
   return String(input || "")
     .replace(/[\n\r\t;]/g, ",")
@@ -180,15 +202,18 @@ function ymd(d) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-// Session time (NY)
+// ----------------------------------------------------------------------------
+// Session time (New York)
+// ----------------------------------------------------------------------------
 function toMs(ts) {
   const x = n(ts);
   if (x === null) return null;
-  if (x > 1e14) return Math.floor(x / 1e6); // ns -> ms
-  if (x > 1e12) return Math.floor(x); // ms
-  if (x > 1e9) return Math.floor(x * 1000); // s -> ms
+  if (x > 1e14) return Math.floor(x / 1e6); // nanoseconds -> milliseconds
+  if (x > 1e12) return Math.floor(x); // milliseconds
+  if (x > 1e9) return Math.floor(x * 1000); // seconds -> milliseconds
   return null;
 }
+
 function nyHM(ms) {
   try {
     const d = new Date(ms);
@@ -205,7 +230,11 @@ function nyHM(ms) {
     return { h: 0, m: 0 };
   }
 }
+
 function sessionOfMs(ms) {
+  // Premarket: 04:00–09:29
+  // Regular trading hours: 09:30–15:59
+  // After-hours: 16:00–19:59
   const { h, m } = nyHM(ms);
   const mins = h * 60 + m;
   if (mins >= 4 * 60 && mins < 9 * 60 + 30) return "pre";
@@ -214,7 +243,20 @@ function sessionOfMs(ms) {
   return "off";
 }
 
-// group helpers (hay bị “mất”)
+function extractSnapshotTimestampMs(snap) {
+  const root = snap?.results ?? snap ?? {};
+  const ms =
+    toMs(root?.lastTrade?.t) ??
+    toMs(root?.lastQuote?.t) ??
+    toMs(root?.updated) ??
+    toMs(root?.timestamp) ??
+    toMs(root?.e) ??
+    toMs(root?.s) ??
+    null;
+  return ms;
+}
+
+// group helpers
 function groupToDirection(group) {
   if (String(group || "").trim() === "topLosers") return "losers";
   return "gainers";
@@ -245,6 +287,7 @@ function axiosFail(e) {
   const bodyPreview = typeof data === "string" ? data.slice(0, 800) : JSON.stringify(data).slice(0, 800);
   return { kind: "http", status, message: msg, url, bodyPreview };
 }
+
 async function safeGet(url, { params, headers }) {
   try {
     const r = await axios.get(url, { params, headers, timeout: 25000, validateStatus: () => true });
@@ -292,7 +335,6 @@ async function fetchSnapshotAll() {
   const url = MASSIVE_SNAPSHOT_ALL_URL.replace(/\/+$/, "");
   const a = auth({}, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
-
   const rows = readRowsFromAnySnapshotShape(r.data);
   return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows, errorDetail: r.errorDetail };
 }
@@ -327,7 +369,7 @@ async function fetchAggs5m(sym) {
 }
 
 // ============================================================================
-// SECTION 05 — Normalize Snapshot (Open/Gap best-effort)
+// SECTION 05 — Normalize Snapshot (price/open/prevClose/gap/float/marketCap)
 // ============================================================================
 function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
   if (!obj || typeof obj !== "object") return { value: null };
@@ -411,6 +453,8 @@ function normalizeSnapshotAuto(ticker, snap) {
   if (pricePct === null && price !== null && prevClose !== null && prevClose > 0) {
     pricePct = ((price - prevClose) / prevClose) * 100;
   }
+
+  // Gap% here is best-effort; final correct Regular Trading Hours gap is overwritten later by Polygon.
   const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : null;
 
   let floatShares =
@@ -430,6 +474,8 @@ function normalizeSnapshotAuto(ticker, snap) {
     null;
   if (marketCap === null) marketCap = findFirstNumberByKeys(root, ["marketcap", "mktcap", "market_cap", "capitalization"]).value;
 
+  // Market capitalization estimation if missing:
+  // MarketCapitalization = LastPrice * FloatShares
   const marketCapEst = marketCap === null && price !== null && floatShares !== null ? price * floatShares : null;
   const marketCapFinal = marketCap ?? marketCapEst;
 
@@ -457,8 +503,19 @@ function addExtPctFromPrevClose(row) {
   return { ...row, extPct: extPct !== null ? round2(extPct) : null };
 }
 
+// Float Turnover Percent: (Volume / FloatShares) * 100
+function addFloatTurnoverPct(row) {
+  const volume = n(row?.volume);
+  const floatShares = n(row?.floatShares);
+  const floatTurnoverPct =
+    volume !== null && floatShares !== null && floatShares > 0
+      ? (volume / floatShares) * 100
+      : null;
+  return { ...row, floatTurnoverPct: floatTurnoverPct !== null ? round2(floatTurnoverPct) : null };
+}
+
 // ============================================================================
-// SECTION 05.5 — Float Enrich (FMP) (best-effort, cached)
+// SECTION 05.5 — Float Enrich (Financial Modeling Prep shares-float)
 // ============================================================================
 const floatCache = new Map(); // sym -> {ts, floatShares}
 async function fetchFloatSharesFMP(sym) {
@@ -470,8 +527,7 @@ async function fetchFloatSharesFMP(sym) {
   const hit = floatCache.get(ticker);
   if (hit && Date.now() - hit.ts < FLOAT_TTL_MS) return { ok: true, floatShares: hit.floatShares, cached: true };
 
-  // FMP “stable” endpoint
-  const url = `https://financialmodelingprep.com/stable/shares-float`;
+  const url = "https://financialmodelingprep.com/stable/shares-float";
   const r = await safeGet(url, {
     params: { symbol: ticker, apikey: FMP_API_KEY },
     headers: { "user-agent": "ALGTP" },
@@ -480,7 +536,6 @@ async function fetchFloatSharesFMP(sym) {
   const arr = Array.isArray(r.data) ? r.data : Array.isArray(r.data?.data) ? r.data.data : [];
   const row = arr && arr.length ? arr[0] : null;
 
-  // field names can vary; try multiple
   const fs =
     n(row?.floatShares) ??
     n(row?.float) ??
@@ -496,17 +551,17 @@ async function fetchFloatSharesFMP(sym) {
 
 async function enrichRowsWithFloat(rows, maxN = 200) {
   if (!ENABLE_FLOAT_ENRICH) return rows;
-  const top = rows.slice(0, maxN);
 
-  const need = top
+  const top = rows.slice(0, maxN);
+  const needSymbols = top
     .filter((r) => r && (r.floatShares == null || r.floatM == null))
     .map((r) => r.symbol)
     .filter(Boolean);
 
-  const uniq = Array.from(new Set(need));
-  if (!uniq.length) return rows;
+  const symbols = Array.from(new Set(needSymbols));
+  if (!symbols.length) return rows;
 
-  const fetched = await mapPool(uniq, Math.min(6, SNAP_CONCURRENCY), async (sym) => {
+  const fetched = await mapPool(symbols, Math.min(6, SNAP_CONCURRENCY), async (sym) => {
     const x = await fetchFloatSharesFMP(sym);
     return { sym, ...x };
   });
@@ -514,15 +569,37 @@ async function enrichRowsWithFloat(rows, maxN = 200) {
   const map = new Map(fetched.filter((x) => x.ok && x.floatShares != null).map((x) => [x.sym, x.floatShares]));
 
   return rows.map((r) => {
-    const fs = map.get(r.symbol);
-    if (!fs) return r;
-    return {
+    const fmpFloatShares = map.get(r.symbol);
+    if (!fmpFloatShares) return r;
+
+    const floatShares = r.floatShares ?? fmpFloatShares;
+    const floatM = r.floatM ?? round2(floatShares / 1_000_000);
+    const floatCat = r.floatCat ?? floatCategory(floatShares);
+
+    // If market capitalization is missing, estimate:
+    // MarketCapitalization = LastPrice * FloatShares
+    const price = n(r?.price);
+    const marketCapExisting = n(r?.marketCap);
+
+    const marketCap =
+      marketCapExisting != null
+        ? Math.round(marketCapExisting)
+        : (price != null ? Math.round(price * floatShares) : (r.marketCap ?? null));
+
+    const marketCapB = marketCap != null ? round2(marketCap / 1_000_000_000) : (r.marketCapB ?? null);
+    const cap = capCategory(marketCap);
+
+    return addFloatTurnoverPct({
       ...r,
-      floatShares: r.floatShares ?? fs,
-      floatM: r.floatM ?? round2(fs / 1_000_000),
-      floatCat: r.floatCat ?? floatCategory(fs),
-      floatSource: "FMP",
-    };
+      floatShares,
+      floatM,
+      floatCat,
+      floatSource: "financialmodelingprep_shares_float",
+      marketCap,
+      marketCapB,
+      cap,
+      capSource: (marketCapExisting != null) ? (r.capSource || "snapshot") : "last_price_times_float_shares",
+    });
   });
 }
 
@@ -559,7 +636,7 @@ function paSignalIcon(row) {
 }
 
 // ============================================================================
-// SECTION 07 — Indicators (EMA/SMA/VWAP) + AO
+// SECTION 07 — Indicators (EMA/SMA/VWAP) + Awesome Oscillator
 // ============================================================================
 function computeSMA(arr, len) {
   if (!Array.isArray(arr) || arr.length < len) return null;
@@ -635,29 +712,30 @@ function indicatorsFromAggs5m(barsDesc) {
     vwap_5m: vwap !== null ? round2(vwap) : null,
     lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
     avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
-    _bars5m_forAO: bars, // keep for AO
+    _bars5m_forAwesomeOscillator: bars,
   };
 }
 
-function computeAOFrom5mBars(bars) {
-  // AO = SMA(5, median) - SMA(34, median)
+function computeAwesomeOscillatorFrom5mBars(bars) {
+  // Awesome Oscillator = SimpleMovingAverage(5, median) - SimpleMovingAverage(34, median)
   if (!Array.isArray(bars) || bars.length < 34) return { ao: null, aoPrev: null };
-  const med = bars
+
+  const medianPriceSeries = bars
     .filter((b) => n(b?.h) !== null && n(b?.l) !== null)
     .map((b) => (Number(b.h) + Number(b.l)) / 2)
     .reverse();
 
-  if (med.length < 35) return { ao: null, aoPrev: null };
+  if (medianPriceSeries.length < 35) return { ao: null, aoPrev: null };
 
-  const smaAt = (arr, len, idx) => {
+  const simpleMovingAverageAt = (arr, len, idx) => {
     if (idx + len > arr.length) return null;
     let s = 0;
     for (let i = idx; i < idx + len; i++) s += arr[i];
     return s / len;
   };
 
-  const aoNow = smaAt(med, 5, 0) - smaAt(med, 34, 0);
-  const aoPrev = smaAt(med, 5, 1) - smaAt(med, 34, 1);
+  const aoNow = simpleMovingAverageAt(medianPriceSeries, 5, 0) - simpleMovingAverageAt(medianPriceSeries, 34, 0);
+  const aoPrev = simpleMovingAverageAt(medianPriceSeries, 5, 1) - simpleMovingAverageAt(medianPriceSeries, 34, 1);
 
   return { ao: aoNow !== null ? round2(aoNow) : null, aoPrev: aoPrev !== null ? round2(aoPrev) : null };
 }
@@ -671,10 +749,13 @@ function attach5mSignals(row) {
   const aboveVWAP = price !== null && vwap !== null ? price > vwap : false;
   const volSpike = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol >= avgVol * VOL_SPIKE_MULT : false;
 
+  const volRatio = lastVol !== null && avgVol !== null && avgVol > 0 ? lastVol / avgVol : null;
+
   return {
     ...row,
     aboveVWAP_5m: aboveVWAP,
     volSpike_5m: volSpike,
+    volRatio_5m: volRatio !== null ? Number(volRatio.toFixed(2)) : null,
     paIcon: paSignalIcon({ aboveVWAP_5m: aboveVWAP, volSpike_5m: volSpike }),
   };
 }
@@ -700,8 +781,8 @@ async function attachIndicatorsIfEnabled(rows) {
       return { symbol: r.symbol };
     }
     const base = indicatorsFromAggs5m(a.bars);
-    const aoData = computeAOFrom5mBars(base._bars5m_forAO || []);
-    delete base._bars5m_forAO;
+    const aoData = computeAwesomeOscillatorFrom5mBars(base._bars5m_forAwesomeOscillator || []);
+    delete base._bars5m_forAwesomeOscillator;
     return { symbol: r.symbol, ...base, ...aoData };
   });
 
@@ -709,21 +790,21 @@ async function attachIndicatorsIfEnabled(rows) {
   let out = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
   out = out.map(attach5mSignals);
 
-  // AO filter (optional)
   if (ENABLE_AO_FILTER) out = out.filter(aoPass);
 
   return { rows: out, aggsErrors };
 }
 
 // ============================================================================
-// SECTION 08 — HALT WS + /halts
+// SECTION 08 — HALT WebSocket + /halts
 // ============================================================================
 const haltedMap = new Map(); // sym -> { halted, lastEvent, tsMs, reason }
+
 function setHalt(sym) {
-  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: Date.now(), reason: "LULD" });
+  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: Date.now(), reason: "LimitUpLimitDown" });
 }
 function setResume(sym) {
-  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: Date.now(), reason: "LULD" });
+  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: Date.now(), reason: "LimitUpLimitDown" });
 }
 
 function handleLULD(payload) {
@@ -744,15 +825,15 @@ function handleLULD(payload) {
 
 function startHaltWebSocket() {
   if (!ENABLE_HALT_WS) return;
-  if (!WebSocket) return console.log("⚠️ HALT WS disabled: npm i ws");
-  if (!MASSIVE_API_KEY) return console.log("⚠️ HALT WS disabled: missing MASSIVE_API_KEY");
+  if (!WebSocket) return console.log("⚠️ HALT WebSocket disabled: npm i ws");
+  if (!MASSIVE_API_KEY) return console.log("⚠️ HALT WebSocket disabled: missing MASSIVE_API_KEY");
 
   const ws = new WebSocket(MASSIVE_WS_URL);
   let subscribed = false;
 
   ws.on("open", () => {
     ws.send(JSON.stringify({ action: "auth", params: MASSIVE_API_KEY }));
-    console.log("✅ HALT WS connected (waiting auth_success...)");
+    console.log("✅ HALT WebSocket connected (waiting auth_success...)");
   });
 
   ws.on("message", (buf) => {
@@ -764,29 +845,34 @@ function startHaltWebSocket() {
       if (st && String(st.status || "").toLowerCase() === "auth_success" && !subscribed) {
         subscribed = true;
         ws.send(JSON.stringify({ action: "subscribe", params: "LULD.*" }));
-        console.log("✅ HALT WS auth_success → subscribed LULD.*");
+        console.log("✅ HALT WebSocket auth_success → subscribed LULD.*");
       }
       handleLULD(parsed);
     } catch {}
   });
 
   ws.on("close", () => {
-    console.log("⚠️ HALT WS closed. Reconnect in 3s...");
+    console.log("⚠️ HALT WebSocket closed. Reconnect in 3 seconds...");
     setTimeout(startHaltWebSocket, 3000);
   });
 
-  ws.on("error", (err) => console.log("⚠️ HALT WS error:", String(err?.message || err)));
+  ws.on("error", (err) => console.log("⚠️ HALT WebSocket error:", String(err?.message || err)));
 }
 
 function attachHaltFlag(row) {
   const sym = String(row?.symbol || "").trim().toUpperCase();
   if (!sym) return row;
   const x = haltedMap.get(sym);
-  return { ...row, halted: Boolean(x?.halted), haltIcon: x?.halted ? "⛔" : "", haltTsMs: x?.tsMs ?? null };
+  return {
+    ...row,
+    halted: Boolean(x?.halted),
+    haltIcon: x?.halted ? "⛔" : "",
+    haltTsMs: x?.tsMs ?? null,
+  };
 }
 
 app.get("/halts", (req, res) => {
-  const only = String(req.query.only || "all").toLowerCase(); // all|halted
+  const only = String(req.query.only || "all").toLowerCase(); // all | halted
   const out = [];
   for (const [symbol, v] of haltedMap.entries()) {
     if (only === "halted" && !v.halted) continue;
@@ -797,10 +883,8 @@ app.get("/halts", (req, res) => {
 });
 
 // ============================================================================
-// SECTION 09 — AM WS (minute aggregates) + enrich cache + DAILY OPEN (Gap%)
+// SECTION 09 — AM WebSocket (minute aggregates) + enrich cache
 // ============================================================================
-
-// ---------- AM WS cache ----------
 const amMap = new Map(); // sym -> AM payload
 
 function trimAMCache() {
@@ -828,15 +912,15 @@ function handleAMPayload(payload) {
 
 function startAMWebSocket() {
   if (!ENABLE_AM_WS) return;
-  if (!WebSocket) return console.log("⚠️ AM WS disabled: npm i ws");
-  if (!MASSIVE_API_KEY) return console.log("⚠️ AM WS disabled: missing MASSIVE_API_KEY");
+  if (!WebSocket) return console.log("⚠️ AM WebSocket disabled: npm i ws");
+  if (!MASSIVE_API_KEY) return console.log("⚠️ AM WebSocket disabled: missing MASSIVE_API_KEY");
 
   const ws = new WebSocket(MASSIVE_WS_URL);
   let subscribed = false;
 
   ws.on("open", () => {
     ws.send(JSON.stringify({ action: "auth", params: MASSIVE_API_KEY }));
-    console.log("✅ AM WS connected (waiting auth_success...)");
+    console.log("✅ AM WebSocket connected (waiting auth_success...)");
   });
 
   ws.on("message", (buf) => {
@@ -848,7 +932,7 @@ function startAMWebSocket() {
       if (st && String(st.status || "").toLowerCase() === "auth_success" && !subscribed) {
         subscribed = true;
         ws.send(JSON.stringify({ action: "subscribe", params: AM_WS_SUBS }));
-        console.log(`✅ AM WS auth_success → subscribed: ${AM_WS_SUBS}`);
+        console.log(`✅ AM WebSocket auth_success → subscribed: ${AM_WS_SUBS}`);
       }
 
       handleAMPayload(parsed);
@@ -856,14 +940,14 @@ function startAMWebSocket() {
   });
 
   ws.on("close", () => {
-    console.log("⚠️ AM WS closed. Reconnect in 3s...");
+    console.log("⚠️ AM WebSocket closed. Reconnect in 3 seconds...");
     setTimeout(startAMWebSocket, 3000);
   });
 
-  ws.on("error", (err) => console.log("⚠️ AM WS error:", String(err?.message || err)));
+  ws.on("error", (err) => console.log("⚠️ AM WebSocket error:", String(err?.message || err)));
 }
 
-// ---------- AM enrich snapshot cache ----------
+// AM enrich snapshot cache
 const amSnapCache = new Map(); // sym -> {ts,row}
 function getSnapCached(sym) {
   const hit = amSnapCache.get(sym);
@@ -877,23 +961,25 @@ function setSnapCached(sym, row) {
 
 function normalizeFromAMOnly(sym, am) {
   const price = n(am?.c) ?? null;
-  const op = n(am?.op) ?? null; // AM "open" (minute)
-  const extPct = price !== null && op !== null && op > 0 ? ((price - op) / op) * 100 : null;
+  const openMinute = n(am?.op) ?? null; // AM minute "open"
+  const extPct = price !== null && openMinute !== null && openMinute > 0 ? ((price - openMinute) / openMinute) * 100 : null;
   const vol = n(am?.av) ?? n(am?.v) ?? null;
   const ms = toMs(am?.e) || toMs(am?.s);
 
   return {
     symbol: sym,
     price: price !== null ? round2(price) : null,
-    open: op !== null ? round2(op) : null, // keep for fallback
+    open: openMinute !== null ? round2(openMinute) : null,
     pricePct: null,
     gapPct: null,
     extPct: extPct !== null ? round2(extPct) : null,
     volume: vol !== null ? Math.round(vol) : null,
+    floatShares: null,
     floatM: null,
+    marketCap: null,
     marketCapB: null,
     cap: null,
-    source: "AM_WS",
+    source: "AM_WebSocket",
     am_ts: ms,
   };
 }
@@ -902,13 +988,24 @@ function mergeAMWithSnapshot(amRow, snapRow) {
   const price = n(amRow?.price) ?? n(snapRow?.price);
   const prevClose = n(snapRow?.prevClose);
 
-  // open: snapshot first, fallback to AM open
+  // open: snapshot first, fallback to AM openMinute
   let open = n(snapRow?.open);
   if (open === null) open = n(amRow?.open);
 
-  const pricePct = price !== null && prevClose !== null && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : n(snapRow?.pricePct);
-  const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : n(snapRow?.gapPct);
-  const extPct = price !== null && prevClose !== null && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : n(amRow?.extPct);
+  const pricePct =
+    price !== null && prevClose !== null && prevClose > 0
+      ? ((price - prevClose) / prevClose) * 100
+      : n(snapRow?.pricePct);
+
+  const gapPct =
+    open !== null && prevClose !== null && prevClose > 0
+      ? ((open - prevClose) / prevClose) * 100
+      : n(snapRow?.gapPct);
+
+  const extPct =
+    price !== null && prevClose !== null && prevClose > 0
+      ? ((price - prevClose) / prevClose) * 100
+      : n(amRow?.extPct);
 
   const volA = n(amRow?.volume);
   const volS = n(snapRow?.volume);
@@ -923,12 +1020,14 @@ function mergeAMWithSnapshot(amRow, snapRow) {
     gapPct: gapPct !== null ? round2(gapPct) : null,
     extPct: extPct !== null ? round2(extPct) : null,
     volume: volume !== null ? Math.round(volume) : null,
-    source: "AM+SNAP",
+    source: "AM_WebSocket_plus_Snapshot",
     am_ts: amRow?.am_ts ?? null,
   };
 }
 
-// ---------- DAILY OPEN/PREVCLOSE (Polygon aggs) to compute GAP% ----------
+// ============================================================================
+// SECTION 09.5 — Polygon daily aggregates (Regular Trading Hours open / previous close)
+// ============================================================================
 const dailyOpenCache = new Map(); // sym -> {ymd, open, prevClose, ts}
 
 function todayYMD_NY() {
@@ -960,7 +1059,7 @@ async function fetchDailyOpenPrevClose(sym) {
     return { ok: true, open: hit.open, prevClose: hit.prevClose, cached: true };
   }
 
-  if (!POLYGON_API_KEY) return { ok: false, open: null, prevClose: null, error: "missing POLYGON_API_KEY" };
+  if (!POLYGON_API_KEY) return { ok: false, open: null, prevClose: null, error: "missing_POLYGON_API_KEY" };
 
   const base = POLYGON_BASE_URL.replace(/\/+$/, "");
   const to = ymdNY;
@@ -985,17 +1084,15 @@ async function fetchDailyOpenPrevClose(sym) {
   return { ok: true, open: open ?? null, prevClose, cached: false };
 }
 
-async function enrichRowsWithDailyOpen(rows, maxN = 120) {
+async function enrichRowsWithDailyOpen(rows, maxN = 200) {
+  // GapPercent (Regular Trading Hours) = ((RegularTradingHoursOpen - PreviousClose) / PreviousClose) * 100
+  // Always prefer Polygon daily aggregates because snapshot open or AM minute open can be NOT Regular Trading Hours open.
+
   const top = rows.slice(0, maxN);
-  const need = top
-    .filter((r) => r && (r.open == null || r.prevClose == null || r.gapPct == null))
-    .map((r) => r.symbol)
-    .filter(Boolean);
+  const symbols = Array.from(new Set(top.map((r) => r?.symbol).filter(Boolean)));
+  if (!symbols.length) return rows;
 
-  const uniq = Array.from(new Set(need));
-  if (!uniq.length) return rows;
-
-  const fetched = await mapPool(uniq, Math.min(6, SNAP_CONCURRENCY), async (sym) => {
+  const fetched = await mapPool(symbols, Math.min(6, SNAP_CONCURRENCY), async (sym) => {
     const x = await fetchDailyOpenPrevClose(sym);
     return { sym, ...x };
   });
@@ -1006,19 +1103,32 @@ async function enrichRowsWithDailyOpen(rows, maxN = 120) {
     const x = map.get(r.symbol);
     if (!x) return r;
 
-    const open = r.open ?? (x.open != null ? round2(x.open) : null);
-    const prevClose = r.prevClose ?? (x.prevClose != null ? round2(x.prevClose) : null);
+    const polygonOpen = x.open != null ? round2(x.open) : null;
+    const polygonPrevClose = x.prevClose != null ? round2(x.prevClose) : null;
+
+    const open = polygonOpen ?? r.open ?? null;
+    const prevClose = polygonPrevClose ?? r.prevClose ?? null;
+
     const gapPct =
-      open != null && prevClose != null && prevClose > 0
+      open !== null && prevClose !== null && prevClose > 0
         ? round2(((open - prevClose) / prevClose) * 100)
         : r.gapPct;
 
-    return { ...r, open, prevClose, gapPct, gapSource: "daily_aggs" };
+    return {
+      ...r,
+      open,
+      prevClose,
+      gapPct,
+      gapSource:
+        (polygonOpen != null || polygonPrevClose != null)
+          ? "polygon_daily_aggregates_regular_trading_hours_open_previous_close"
+          : (r.gapSource ?? null),
+    };
   });
 }
 
 // ============================================================================
-// SECTION 10 — Builders (SnapshotAll + AM fallback) + finalizeRows
+// SECTION 10 — Builders + sorting (including Movers ranking by Gap% + Float Turnover %)
 // ============================================================================
 function finalizeRows(rows) {
   let out = rows.map((r) => {
@@ -1026,15 +1136,50 @@ function finalizeRows(rows) {
     return { ...r, demandScore: d, signalIcon: signalIcon(d), paIcon: r.paIcon || "" };
   });
   out = out.map(attachHaltFlag);
+  out = out.map(addFloatTurnoverPct);
   return out;
 }
 
-async function buildRowsFromSnapshotAll({ cap, limit, session }) {
+function prelimScoreVolatile(r) {
+  const a = Math.abs(n(r?.gapPct) ?? 0);
+  const b = Math.abs(n(r?.pricePct) ?? 0);
+  const c = Math.abs(n(r?.extPct) ?? 0);
+  return Math.max(a, b, c);
+}
+
+function sortForPrepick(rows, mode) {
+  const safeN = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+  if (mode === "active") return [...rows].sort((a, b) => safeN(b.volume) - safeN(a.volume));
+  if (mode === "volatile") return [...rows].sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || safeN(b.volume) - safeN(a.volume));
+  if (mode === "gap") return [...rows].sort((a, b) => Math.abs(safeN(b.gapPct)) - Math.abs(safeN(a.gapPct)) || safeN(b.volume) - safeN(a.volume));
+  if (mode === "gapFloatRank")
+    return [...rows].sort((a, b) =>
+      Math.abs(safeN(b.gapPct)) - Math.abs(safeN(a.gapPct)) ||
+      safeN(b.floatTurnoverPct) - safeN(a.floatTurnoverPct) ||
+      safeN(b.volume) - safeN(a.volume)
+    );
+  return [...rows].sort((a, b) => safeN(b.volume) - safeN(a.volume));
+}
+
+function sortGapFloatVolume(rows) {
+  // Movers ranking rule:
+  // 1) Highest absolute GapPercent first (Regular Trading Hours gap)
+  // 2) Highest FloatTurnoverPercent next (Volume / FloatShares * 100)
+  // 3) Highest Volume last
+  rows.sort(
+    (a, b) =>
+      Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
+      (b.floatTurnoverPct ?? 0) - (a.floatTurnoverPct ?? 0) ||
+      (b.volume ?? 0) - (a.volume ?? 0)
+  );
+}
+
+async function buildRowsFromSnapshotAll({ cap = "all", limit = 120, session = null, sortMode = "gap" } = {}) {
   if (!ENABLE_SNAPSHOT_ALL) {
     return {
       ok: false,
       status: 403,
-      body: { ok: false, error: "Snapshot-All is OFF", hint: "Set ENABLE_SNAPSHOT_ALL=true or use AM WS fallback." },
+      body: { ok: false, error: "Snapshot-All is OFF", hint: "Set ENABLE_SNAPSHOT_ALL=true or use WebSocket fallback." },
     };
   }
 
@@ -1057,11 +1202,10 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
     rows.push(r);
   }
 
-  // session filter from snapshot timestamps
   if (session) {
     rows = rows.filter((r) => {
       const raw = snapMap.get(r.symbol);
-      const ms = toMs(raw?.lastTrade?.t ?? raw?.lastQuote?.t ?? raw?.updated ?? raw?.timestamp ?? raw?.e ?? raw?.s);
+      const ms = extractSnapshotTimestampMs(raw);
       if (!ms) return false;
       return sessionOfMs(ms) === session;
     });
@@ -1069,25 +1213,33 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
 
   rows = rows.filter((r) => capPass(r, cap));
 
-  // ✅ fill open/gap using daily aggs (top N)
+  // Overwrite open/prevClose/gapPct using Polygon daily aggregates (Regular Trading Hours open / previous close)
   rows = await enrichRowsWithDailyOpen(rows, 200);
 
-  // ✅ float enrich (optional)
+  // Enrich float using Financial Modeling Prep shares-float
   rows = await enrichRowsWithFloat(rows, 200);
+
+  const lim = clamp(Number(limit || 120), 10, 500);
+  const prepickN = Math.max(250, lim * 5);
+  rows = sortForPrepick(rows, sortMode).slice(0, prepickN);
 
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
   rows = finalizeRows(withInd);
 
-  // sort: gap first
-  rows.sort(
-    (a, b) =>
-      Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
-      Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
-      Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0) ||
-      (b.volume ?? 0) - (a.volume ?? 0)
-  );
+  // final sort
+  if (sortMode === "active") rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  else if (sortMode === "volatile") rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
+  else if (sortMode === "gapFloatRank") sortGapFloatVolume(rows);
+  else {
+    rows.sort(
+      (a, b) =>
+        Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
+        Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
+        Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0) ||
+        (b.volume ?? 0) - (a.volume ?? 0)
+    );
+  }
 
-  const lim = clamp(Number(limit || 100), 5, 500);
   rows = rows.slice(0, lim);
 
   return {
@@ -1104,7 +1256,7 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
   };
 }
 
-async function buildRowsFromAMCache({ cap, limit, session }) {
+async function buildRowsFromAMCache({ cap = "all", limit = 120, session = null, sortMode = "gap" } = {}) {
   let base = [];
   for (const [sym, am] of amMap.entries()) {
     const ms = toMs(am?.e) || toMs(am?.s);
@@ -1114,13 +1266,11 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
   }
 
   if (!base.length) {
-    return { ok: true, status: 200, body: { ok: true, source: "AM_WS", session, cap, results: [] } };
+    return { ok: true, status: 200, body: { ok: true, source: "AM_WebSocket", session, cap, results: [] } };
   }
 
-  const needCap = String(cap || "all").toLowerCase() !== "all";
-  const candidates = [...base].sort(
-    (a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0)
-  );
+  const lim = clamp(Number(limit || 120), 10, 500);
+  const candidates = sortForPrepick(base, sortMode);
   const pick = candidates.slice(0, AM_ENRICH_LIMIT).map((x) => x.symbol);
 
   const toFetch = pick.filter((sym) => !getSnapCached(sym));
@@ -1139,29 +1289,33 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
     return snapRow ? mergeAMWithSnapshot(r, snapRow) : r;
   });
 
-  if (needCap) rows = rows.filter((r) => capPass(r, cap));
+  if (String(cap || "all").toLowerCase() !== "all") rows = rows.filter((r) => capPass(r, cap));
 
-  // ✅ fill open/gap using daily aggs (top N)
+  // Overwrite open/prevClose/gapPct using Polygon daily aggregates (Regular Trading Hours open / previous close)
   rows = await enrichRowsWithDailyOpen(rows, 200);
 
-  // ✅ float enrich (optional)
+  // Enrich float using Financial Modeling Prep shares-float
   rows = await enrichRowsWithFloat(rows, 200);
 
-  const lim = clamp(Number(limit || 100), 5, 500);
-
-  rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
-  rows = rows.slice(0, Math.max(lim * 2, 120));
+  rows = sortForPrepick(rows, sortMode).slice(0, Math.max(200, lim * 4));
 
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
   rows = finalizeRows(withInd);
 
-  rows.sort(
-    (a, b) =>
-      Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
-      (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
-      Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
-      (b.volume ?? 0) - (a.volume ?? 0)
-  );
+  // final sort
+  if (sortMode === "active") rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  else if (sortMode === "volatile") rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
+  else if (sortMode === "gapFloatRank") sortGapFloatVolume(rows);
+  else {
+    rows.sort(
+      (a, b) =>
+        Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
+        (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
+        Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
+        (b.volume ?? 0) - (a.volume ?? 0)
+    );
+  }
+
   rows = rows.slice(0, lim);
 
   return {
@@ -1176,6 +1330,106 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     },
   };
+}
+
+async function buildRowsFromMoversUnion({ cap = "all", limit = 120, sortMode = "active" } = {}) {
+  const lim = clamp(Number(limit || 120), 10, 500);
+
+  const g = await fetchMovers("gainers");
+  const l = await fetchMovers("losers");
+
+  const pool = [...(g.ok ? g.rows : []), ...(l.ok ? l.rows : [])]
+    .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+    .filter(Boolean);
+
+  const tickers = Array.from(new Set(pool)).slice(0, Math.max(400, lim * 8));
+
+  const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+    const r = await fetchTickerSnapshot(t);
+    return { ticker: t, ...r };
+  });
+
+  const good = snaps.filter((x) => x.ok);
+  let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
+
+  if (String(cap || "all").toLowerCase() !== "all") rows = rows.filter((r) => capPass(r, cap));
+
+  rows = await enrichRowsWithDailyOpen(rows, 200);
+  rows = await enrichRowsWithFloat(rows, 200);
+
+  rows = sortForPrepick(rows, sortMode).slice(0, Math.max(250, lim * 5));
+
+  const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
+  rows = finalizeRows(withInd);
+
+  if (sortMode === "gapFloatRank") sortGapFloatVolume(rows);
+  else if (sortMode === "volatile") rows.sort((a, b) => prelimScoreVolatile(b) - prelimScoreVolatile(a) || (b.volume ?? 0) - (a.volume ?? 0));
+  else if (sortMode === "active") rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  else rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) || (b.volume ?? 0) - (a.volume ?? 0));
+
+  rows = rows.slice(0, lim);
+
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      ok: true,
+      source: "MOVERS_UNION",
+      cap,
+      results: rows,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
+    },
+  };
+}
+
+async function buildRowsFromMoversUnionBySession({ session, limit = 120 } = {}) {
+  // Use Massive Movers list as the fastest "fragment":
+  // 1) Massive movers list -> candidate tickers
+  // 2) Massive ticker snapshot -> normalize
+  // 3) Polygon daily aggregates -> overwrite Regular Trading Hours open / previous close -> compute Gap%
+  // 4) Financial Modeling Prep shares-float -> enrich Float -> compute Float Turnover Percent
+  // 5) Rank: Gap% highest first, Float Turnover Percent highest next
+
+  const lim = clamp(Number(limit || 120), 10, 500);
+
+  const g = await fetchMovers("gainers");
+  const l = await fetchMovers("losers");
+
+  const pool = [...(g.ok ? g.rows : []), ...(l.ok ? l.rows : [])]
+    .map((x) => String(x?.ticker ?? x?.symbol ?? x?.sym ?? "").trim().toUpperCase())
+    .filter(Boolean);
+
+  const tickers = Array.from(new Set(pool)).slice(0, Math.max(400, lim * 10));
+
+  const snaps = await mapPool(tickers, SNAP_CONCURRENCY, async (t) => {
+    const r = await fetchTickerSnapshot(t);
+    return { ticker: t, ...r };
+  });
+
+  const good = snaps.filter((x) => x.ok);
+  const snapDataMap = new Map(good.map((x) => [x.ticker, x.data]));
+
+  let rows = good
+    .map((x) => normalizeSnapshotAuto(x.ticker, x.data))
+    .map(addExtPctFromPrevClose);
+
+  // filter by session using snapshot timestamp
+  rows = rows.filter((r) => {
+    const raw = snapDataMap.get(r.symbol);
+    const ms = extractSnapshotTimestampMs(raw);
+    if (!ms) return false;
+    return sessionOfMs(ms) === session;
+  });
+
+  rows = await enrichRowsWithDailyOpen(rows, 200);
+  rows = await enrichRowsWithFloat(rows, 200);
+
+  const { rows: withInd } = await attachIndicatorsIfEnabled(rows);
+  rows = finalizeRows(withInd);
+
+  sortGapFloatVolume(rows);
+
+  return rows.slice(0, lim);
 }
 
 // ============================================================================
@@ -1210,8 +1464,7 @@ function emaSeries(values, len) {
 }
 function vwapSeries(closes, vols) {
   const out = Array(closes.length).fill(null);
-  let pv = 0,
-    vv = 0;
+  let pv = 0, vv = 0;
   for (let i = 0; i < closes.length; i++) {
     const c = closes[i];
     const v = vols[i] || 0;
@@ -1292,7 +1545,22 @@ app.get("/", (req, res) => {
     ok: true,
     message: `${BRAND.legal} running ✅`,
     ui: "/ui",
-    endpoints: ["/list", "/scan", "/snapshot-all", "/premarket", "/aftermarket", "/mini-chart", "/halts", "/api"],
+    endpoints: [
+      "/list",
+      "/scan",
+      "/snapshot-all",
+      "/premarket",
+      "/aftermarket",
+      "/movers-premarket",
+      "/movers-afterhours",
+      "/most-active",
+      "/unusual-volume",
+      "/most-volatile",
+      "/most-lately",
+      "/mini-chart",
+      "/halts",
+      "/api",
+    ],
   });
 });
 
@@ -1302,16 +1570,18 @@ app.get("/api", (req, res) => {
     config: {
       port: PORT,
       snapshotAllEnabled: ENABLE_SNAPSHOT_ALL,
-      indicators5m: ENABLE_5M_INDICATORS,
-      haltWs: ENABLE_HALT_WS,
-      amWs: ENABLE_AM_WS,
-      amSubs: AM_WS_SUBS,
+      indicators5mEnabled: ENABLE_5M_INDICATORS,
+      awesomeOscillatorFilterEnabled: ENABLE_AO_FILTER,
+      haltWebSocketEnabled: ENABLE_HALT_WS,
+      amWebSocketEnabled: ENABLE_AM_WS,
+      amSubscriptions: AM_WS_SUBS,
       amCacheSize: amMap.size,
       amSnapCacheSize: amSnapCache.size,
       miniCacheSize: miniCache.size,
       uiAutoRefreshMs: UI_AUTO_REFRESH_MS,
-      polygonKey: Boolean(POLYGON_API_KEY),
-      floatEnrich: ENABLE_FLOAT_ENRICH,
+      polygonApiKeyPresent: Boolean(POLYGON_API_KEY),
+      floatEnrichEnabled: ENABLE_FLOAT_ENRICH,
+      financialModelingPrepApiKeyPresent: Boolean(FMP_API_KEY),
     },
   });
 });
@@ -1344,13 +1614,12 @@ app.get("/scan", async (req, res) => {
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
 
-    // ✅ fill open/gap using daily aggs (top N)
+    // Overwrite open/prevClose/gapPct using Polygon daily aggregates (Regular Trading Hours open / previous close)
     rows = await enrichRowsWithDailyOpen(rows, 200);
 
-    // ✅ float enrich (optional)
+    // Enrich float using Financial Modeling Prep shares-float
     rows = await enrichRowsWithFloat(rows, 200);
 
-    // keep symbols even if snapshot failed (avoid 0 rows)
     const badRows = bad.map((x) => ({
       symbol: x.ticker,
       price: null,
@@ -1360,13 +1629,15 @@ app.get("/scan", async (req, res) => {
       gapPct: null,
       extPct: null,
       volume: null,
+      floatShares: null,
       floatM: null,
+      floatTurnoverPct: null,
       marketCapB: null,
       cap: null,
       demandScore: 0,
       signalIcon: "⚠️",
       paIcon: "",
-      source: "SNAP_FAIL",
+      source: "SNAPSHOT_FAILED",
     }));
 
     rows = rows.concat(badRows);
@@ -1396,7 +1667,7 @@ app.get("/list", async (req, res) => {
     const miss = envMissingFor({ needAggs: ENABLE_5M_INDICATORS });
     if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
-    const group = String(req.query.group || "topGainers").trim(); // topGainers|topLosers|topGappers
+    const group = String(req.query.group || "topGainers").trim(); // topGainers | topLosers | topGappers
     const cap = String(req.query.cap || "all").trim().toLowerCase();
     const limit = clamp(Number(req.query.limit || 50), 5, 200);
     const minGap = n(req.query.minGap);
@@ -1427,10 +1698,7 @@ app.get("/list", async (req, res) => {
 
     rows = rows.slice(0, limit);
 
-    // ✅ fill open/gap using daily aggs (top N)
     rows = await enrichRowsWithDailyOpen(rows, 200);
-
-    // ✅ float enrich (optional)
     rows = await enrichRowsWithFloat(rows, 200);
 
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
@@ -1457,7 +1725,7 @@ app.get("/list", async (req, res) => {
 app.get("/snapshot-all", async (req, res) => {
   const cap = String(req.query.cap || "all").toLowerCase();
   const limit = req.query.limit;
-  const out = await buildRowsFromSnapshotAll({ cap, limit, session: null });
+  const out = await buildRowsFromSnapshotAll({ cap, limit, session: null, sortMode: "gap" });
   return res.status(out.status).json(out.body);
 });
 
@@ -1466,11 +1734,11 @@ app.get("/premarket", async (req, res) => {
   const limit = req.query.limit;
 
   if (ENABLE_SNAPSHOT_ALL) {
-    const out = await buildRowsFromSnapshotAll({ cap, limit, session: "pre" });
+    const out = await buildRowsFromSnapshotAll({ cap, limit, session: "pre", sortMode: "gap" });
     return res.status(out.status).json(out.body);
   }
 
-  const out = await buildRowsFromAMCache({ cap, limit, session: "pre" });
+  const out = await buildRowsFromAMCache({ cap, limit, session: "pre", sortMode: "gap" });
   return res.status(out.status).json(out.body);
 });
 
@@ -1479,16 +1747,116 @@ app.get("/aftermarket", async (req, res) => {
   const limit = req.query.limit;
 
   if (ENABLE_SNAPSHOT_ALL) {
-    const out = await buildRowsFromSnapshotAll({ cap, limit, session: "after" });
+    const out = await buildRowsFromSnapshotAll({ cap, limit, session: "after", sortMode: "gap" });
     return res.status(out.status).json(out.body);
   }
 
-  const out = await buildRowsFromAMCache({ cap, limit, session: "after" });
+  const out = await buildRowsFromAMCache({ cap, limit, session: "after", sortMode: "gap" });
   return res.status(out.status).json(out.body);
 });
 
+// Movers Premarket / After-hours (Massive Movers list is the fastest source) with ranking by Gap% + Float Turnover %
+app.get("/movers-premarket", async (req, res) => {
+  try {
+    const limit = clamp(Number(req.query.limit || 120), 10, 500);
+    const rows = await buildRowsFromMoversUnionBySession({ session: "pre", limit });
+    res.json({ ok: true, session: "premarket", source: "massive_movers_list", rank: "gap_percent_then_float_turnover_percent_then_volume", results: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "movers-premarket failed", detail: String(e?.message || e) });
+  }
+});
+
+app.get("/movers-afterhours", async (req, res) => {
+  try {
+    const limit = clamp(Number(req.query.limit || 120), 10, 500);
+    const rows = await buildRowsFromMoversUnionBySession({ session: "after", limit });
+    res.json({ ok: true, session: "afterhours", source: "massive_movers_list", rank: "gap_percent_then_float_turnover_percent_then_volume", results: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "movers-afterhours failed", detail: String(e?.message || e) });
+  }
+});
+
+// Most Active / Unusual Volume / Most Volatile / Most Lately
+app.get("/most-active", async (req, res) => {
+  const cap = String(req.query.cap || "all").toLowerCase();
+  const limit = req.query.limit;
+  const out = ENABLE_SNAPSHOT_ALL
+    ? await buildRowsFromSnapshotAll({ cap, limit, session: null, sortMode: "active" })
+    : await buildRowsFromMoversUnion({ cap, limit, sortMode: "active" });
+  return res.status(out.status).json(out.body);
+});
+
+app.get("/most-volatile", async (req, res) => {
+  const cap = String(req.query.cap || "all").toLowerCase();
+  const limit = req.query.limit;
+  const out = ENABLE_SNAPSHOT_ALL
+    ? await buildRowsFromSnapshotAll({ cap, limit, session: null, sortMode: "volatile" })
+    : await buildRowsFromMoversUnion({ cap, limit, sortMode: "volatile" });
+  return res.status(out.status).json(out.body);
+});
+
+app.get("/most-lately", async (req, res) => {
+  const cap = String(req.query.cap || "all").toLowerCase();
+  const limit = clamp(Number(req.query.limit || 120), 10, 500);
+
+  const lastTimestampMsOfRow = (r) => {
+    const a = toMs(r?.am_ts) ?? null;
+    const b = n(r?.haltTsMs) ?? null;
+    return a ?? b ?? 0;
+  };
+
+  const out = ENABLE_SNAPSHOT_ALL
+    ? await buildRowsFromSnapshotAll({ cap, limit: Math.max(250, limit * 3), session: null, sortMode: "active" })
+    : await buildRowsFromMoversUnion({ cap, limit: Math.max(250, limit * 3), sortMode: "active" });
+
+  if (!out.ok) return res.status(out.status).json(out.body);
+
+  let rows = Array.isArray(out.body?.results) ? out.body.results : [];
+  rows = rows
+    .map((r) => ({ ...r, lastTsMs: lastTimestampMsOfRow(r) }))
+    .sort((a, b) => (b.lastTsMs ?? 0) - (a.lastTsMs ?? 0))
+    .slice(0, limit);
+
+  return res.json({ ok: true, cap, results: rows });
+});
+
+app.get("/unusual-volume", async (req, res) => {
+  try {
+    const cap = String(req.query.cap || "all").toLowerCase();
+    const limit = clamp(Number(req.query.limit || 120), 10, 500);
+
+    const base = ENABLE_SNAPSHOT_ALL
+      ? await buildRowsFromSnapshotAll({ cap, limit: Math.max(250, limit * 5), session: null, sortMode: "active" })
+      : await buildRowsFromMoversUnion({ cap, limit: Math.max(250, limit * 5), sortMode: "active" });
+
+    if (!base.ok) return res.status(base.status).json(base.body);
+
+    let rows = Array.isArray(base.body?.results) ? base.body.results : [];
+
+    if (!ENABLE_5M_INDICATORS) {
+      rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+      rows = rows.slice(0, limit);
+      return res.json({
+        ok: true,
+        cap,
+        note: "ENABLE_5M_INDICATORS is false, fallback ranking by volume",
+        results: rows,
+      });
+    }
+
+    rows = rows
+      .filter((r) => r && (r.volSpike_5m || (n(r.volRatio_5m) ?? 0) >= 2))
+      .sort((a, b) => (n(b.volRatio_5m) ?? 0) - (n(a.volRatio_5m) ?? 0) || (b.volume ?? 0) - (a.volume ?? 0))
+      .slice(0, limit);
+
+    res.json({ ok: true, cap, results: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "unusual-volume failed", detail: String(e?.message || e) });
+  }
+});
+
 // ============================================================================
-// SECTION 13 — UI (unchanged logic: stepper + roller + hover mini-chart + risk)
+// SECTION 13 — UI (Dashboard)
 // ============================================================================
 function riskNoticeContent() {
   return {
@@ -1524,7 +1892,6 @@ function renderUI() {
   const hardMax = Number(process.env.SCAN_HARD_MAX || SCAN_HARD_MAX);
   const initMax = Math.max(20, Math.min(hardMax, Number.isFinite(envMax) ? envMax : 200));
 
-  // NOTE: UI HTML/JS kept (signals not touched)
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1712,7 +2079,7 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
           <span class="brandMark">${BRAND?.mark || "🔥"}</span>
           <span class="brandName">${BRAND?.legal || "ALGTP™"}</span>
         </div>
-        <div class="brandSub">Icons • VWAP • Open+Gap • Roller • Hover mini-chart</div>
+        <div class="brandSub">Movers ranked by Gap% + Float Turnover % • Hover mini-chart</div>
       </div>
       <div class="pill">Auto: <b>${autoSec}s</b></div>
     </div>
@@ -1745,7 +2112,7 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
       <div class="right">
         <span class="pill" id="statusPill">Dashboard</span>
         <span class="pill">Snapshot-All: <b>${snapAllOn}</b></span>
-        <span class="pill">VWAP: <b>${vwapOn}</b></span>
+        <span class="pill">Indicators: <b>${vwapOn}</b></span>
       </div>
     </div>
 
@@ -1758,7 +2125,8 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
     </div>
 
     <div class="hint">
-      Paste 500–2000 symbols OK. Scanner will only scan “Max” symbols from the start of your list.
+      Movers boxes rank: highest absolute Gap% first, then highest Float Turnover %, then Volume.
+      Gap% uses Polygon Regular Trading Hours open and previous close. Float uses Financial Modeling Prep shares-float.
     </div>
 
     <div class="err" id="errBox"></div>
@@ -1927,7 +2295,6 @@ async function showMini(ev, sym){
   lineSMA26.setData(data.overlays?.sma26||[]);
   lineVWAP.setData(data.overlays?.vwap||[]);
 }
-
 function hideMini(){ miniSym=null; if(miniBox) miniBox.style.display="none"; }
 
 function bindMiniHover(){
@@ -1946,20 +2313,18 @@ let scanMax = Number(byId("maxSymbols").value || 200);
 const REFRESH_MS = ${UI_AUTO_REFRESH_MS};
 
 const SECTIONS = [
-  { id:"top_movers",  title:"TOP MOVERS",  url:"/list?group=topGainers&cap=all&limit=120", cols:2, limit:10, sort:"pctDesc" },
-  { id:"loss_movers", title:"LOSS MOVERS", url:"/list?group=topLosers&cap=all&limit=120",  cols:2, limit:10, sort:"pctAsc" },
+  { id:"pm_movers", title:"PREMARKET MOVERS (Gap% + Float Turnover %)", url:"/movers-premarket?limit=200", cols:3, limit:40, sort:"gapFloatRank" },
+  { id:"ah_movers", title:"AFTER HOURS MOVERS (Gap% + Float Turnover %)", url:"/movers-afterhours?limit=200", cols:3, limit:40, sort:"gapFloatRank" },
 
-  { id:"gappers", title:"GAPPERS", url:"/list?group=topGappers&cap=all&limit=200&minGap=5", cols:2, limit:10, sort:"gapDesc" },
-  { id:"penny_gappers", title:"PENNY_GAPPERS", url:"/list?group=topGappers&cap=small&limit=200&minGap=10", cols:2, limit:10, sort:"gapDesc" },
+  { id:"gappers", title:"GAPPERS", url:"/list?group=topGappers&cap=all&limit=200&minGap=5", cols:3, limit:20, sort:"gapDesc" },
+  { id:"unusual", title:"UNUSUAL VOLUME", url:"/unusual-volume?cap=all&limit=200", cols:3, limit:20, sort:"uv" },
+  { id:"most_active", title:"MOST ACTIVE", url:"/most-active?cap=all&limit=200", cols:3, limit:20, sort:"active" },
+  { id:"most_volatile", title:"MOST VOLATILE", url:"/most-volatile?cap=all&limit=200", cols:3, limit:20, sort:"volatile" },
 
-  // big box
-  { id:"important", title:"IMPORTANT_STOCKS", url:"/scan?symbols="+encodeURIComponent(importantSymbols)+"&max="+encodeURIComponent(scanMax), cols:6, limit:200, sort:"gapDesc" },
+  // IMPORTANT (big) — hide ticker text but keep hover/click
+  { id:"important", title:"IMPORTANT_STOCKS", url:"/scan?symbols="+encodeURIComponent(importantSymbols)+"&max="+encodeURIComponent(scanMax), cols:6, limit:200, sort:"gapDesc", hideSymbol:true },
 
-  { id:"vwap", title:"VWAP", url:"/list?group=topGainers&cap=all&limit=200", cols:3, limit:12, sort:"vwapFocus" },
-  { id:"main_momo", title:"MAIN MOMO", url:"/list?group=topGainers&cap=all&limit=200", cols:3, limit:12, sort:"gapDesc" },
-  { id:"momo360", title:"MOMO 360", url:"/list?group=topGainers&cap=all&limit=200", cols:3, limit:12, sort:"gapDesc" },
-
-  { id:"halts", title:"HALT", url:"/halts?only=all", cols:3, limit:60, type:"halts" },
+  { id:"halts", title:"HALT (Limit Up / Limit Down)", url:"/halts?only=all", cols:6, limit:120, type:"halts" },
 ];
 
 function boxHtml(sec){
@@ -1977,22 +2342,22 @@ function renderGrid(){ grid.innerHTML = SECTIONS.map(boxHtml).join(""); }
 
 function sortRows(rows, mode){
   const safe = (v)=> (Number.isFinite(Number(v)) ? Number(v) : null);
-
-  if (mode==="pctDesc") return [...rows].sort((a,b)=> (safe(b.pricePct)??-1e18)-(safe(a.pricePct)??-1e18));
-  if (mode==="pctAsc")  return [...rows].sort((a,b)=> (safe(a.pricePct)?? 1e18)-(safe(b.pricePct)?? 1e18));
   if (mode==="gapDesc") return [...rows].sort((a,b)=> (safe(b.gapPct)??-1e18)-(safe(a.gapPct)??-1e18));
-  if (mode==="vwapFocus"){
+  if (mode==="active")  return [...rows].sort((a,b)=> (safe(b.volume)??-1e18)-(safe(a.volume)??-1e18));
+  if (mode==="volatile")return [...rows].sort((a,b)=> (safe(Math.abs(b.gapPct??0))??-1e18)-(safe(Math.abs(a.gapPct??0))??-1e18));
+  if (mode==="uv")      return [...rows].sort((a,b)=> (safe(b.volRatio_5m)??-1e18)-(safe(a.volRatio_5m)??-1e18) || (safe(b.volume)??-1e18)-(safe(a.volume)??-1e18));
+  if (mode==="gapFloatRank"){
     return [...rows].sort((a,b)=>
-      (Number(b.aboveVWAP_5m&&b.volSpike_5m)-Number(a.aboveVWAP_5m&&a.volSpike_5m)) ||
-      (Number(b.aboveVWAP_5m)-Number(a.aboveVWAP_5m)) ||
-      (safe(b.gapPct)??-1e18)-(safe(a.gapPct)??-1e18)
+      Math.abs((safe(b.gapPct)??0)) - Math.abs((safe(a.gapPct)??0)) ||
+      ((safe(b.floatTurnoverPct)??0)) - ((safe(a.floatTurnoverPct)??0)) ||
+      ((safe(b.volume)??0)) - ((safe(a.volume)??0))
     );
   }
   return rows;
 }
 
 function rowsTable(rowsRaw, sec){
-  const rows = sortRows(rowsRaw, sec.sort).slice(0, sec.limit ?? 12);
+  const rows = sortRows(rowsRaw, sec.sort).slice(0, sec.limit ?? 40);
   return \`
   <table>
     <thead>
@@ -2001,32 +2366,35 @@ function rowsTable(rowsRaw, sec){
         <th>PA</th>
         <th>Symbol</th>
         <th class="right">Price</th>
-        <th class="right">Open</th>
+        <th class="right">Regular Open</th>
+        <th class="right">Previous Close</th>
         <th class="right">Gap%</th>
         <th class="right">VWAP</th>
         <th class="right">Vol</th>
-        <th class="right">New_Vol</th>
-        <th class="right">Float</th>
+        <th class="right">Float(M)</th>
+        <th class="right">Float%</th>
       </tr>
     </thead>
     <tbody>
       \${rows.map(r=>{
         const sym=String(r.symbol||"");
         const safeSym=sym.replace(/'/g,"");
+        const label = sec.hideSymbol ? "•" : sym;
         return \`
         <tr>
           <td>\${r.signalIcon||""}</td>
           <td>\${r.paIcon||""}</td>
           <td class="mono">
-            <a class="symLink" data-sym="\${safeSym}" href="javascript:void(0)" onclick="handleTickerClick(event,'\${safeSym}')">\${sym}</a>
+            <a class="symLink" data-sym="\${safeSym}" href="javascript:void(0)" onclick="handleTickerClick(event,'\${safeSym}')">\${label}</a>
           </td>
           <td class="right mono">\${fmtNum(r.price)}</td>
           <td class="right mono">\${fmtNum(r.open)}</td>
+          <td class="right mono">\${fmtNum(r.prevClose)}</td>
           <td class="right mono">\${fmtNum(r.gapPct)}%</td>
           <td class="right mono">\${fmtNum(r.vwap_5m)}</td>
           <td class="right mono">\${fmtInt(r.volume)}</td>
-          <td class="right mono">\${fmtInt(r.lastVol_5m)}</td>
           <td class="right mono">\${fmtNum(r.floatM)}</td>
+          <td class="right mono">\${fmtNum(r.floatTurnoverPct)}%</td>
         </tr>\`;
       }).join("")}
     </tbody>
@@ -2034,7 +2402,7 @@ function rowsTable(rowsRaw, sec){
 }
 
 function haltsTable(rows){
-  const top = rows.slice(0, 120);
+  const top = rows.slice(0, 200);
   return \`
   <table>
     <thead><tr><th>Symbol</th><th>Time</th><th>Status</th></tr></thead>
@@ -2088,7 +2456,7 @@ async function loadSection(sec){
 
     if (!j || !j.ok){
       meta.textContent="Error";
-      body.innerHTML = "<div style='padding:10px;color:#ffb4b4;font-size:12px;'>"+(JSON.stringify(j).slice(0,700))+"</div>";
+      body.innerHTML = "<div style='padding:10px;color:#ffb4b4;font-size:12px;'>"+(JSON.stringify(j).slice(0,900))+"</div>";
       return;
     }
 
@@ -2186,6 +2554,7 @@ function applyImportant(){
 // init
 renderGrid();
 loadAll();
+renderRoller(importantSymbols);
 
 // auto refresh
 setInterval(()=>{
@@ -2202,7 +2571,7 @@ setInterval(()=>{
 app.get("/ui", (req, res) => res.type("html").send(renderUI()));
 
 // ============================================================================
-// SECTION 14 — Start WS + Listen
+// SECTION 14 — Start WebSockets + Listen
 // ============================================================================
 startHaltWebSocket();
 startAMWebSocket();
@@ -2213,6 +2582,8 @@ app.listen(PORT, () => {
   console.log(`🚀 UI: ${base}/ui`);
   console.log(`📈 Mini chart: ${base}/mini-chart?symbol=AAPL&tf=1`);
   console.log(`⛔ Halts: ${base}/halts`);
+  console.log(`📌 Movers Premarket: ${base}/movers-premarket?limit=50`);
+  console.log(`📌 Movers After-hours: ${base}/movers-afterhours?limit=50`);
   console.log(`ℹ️ API: ${base}/api`);
   console.log("");
 });

@@ -2,33 +2,22 @@
 // 🔥 ALGTP™ — Massive Scanner (REST + WS HALT + WS AM fallback + Mini Chart Hover)
 // Single-file Node.js (ESM)
 // ----------------------------------------------------------------------------
-// UI:
-//  - /ui   (Dashboard box-matrix like screenshot)
-// API:
-//  - /list, /scan, /snapshot-all, /premarket, /aftermarket, /halts, /api
-// Extra:
-//  - /mini-chart?symbol=AAPL&tf=1
+// UI:  /ui   (Dashboard: Symbols + Max Stepper + Roller + Box matrix)
+// API: /list, /scan, /premarket, /aftermarket, /snapshot-all, /halts, /api
+// Extra: /mini-chart?symbol=AAPL&tf=1   (hover mini chart)
 // ----------------------------------------------------------------------------
-// UI Behavior:
-//  - Top bar: ONLY Symbols input active (Enter => refresh IMPORTANT_STOCKS)
-//  - Rounded pills (“quang tròn”) for status, auto, snapshot-all
-//  - Hover ticker => mini chart
-//  - Click ticker => TradingView
-// ----------------------------------------------------------------------------
-// Data Behavior:
-//  - ENABLE_SNAPSHOT_ALL=true  => Snapshot-All for pre/after filtering
-//  - ENABLE_SNAPSHOT_ALL=false => AM WS fallback + REST snapshot enrich cache
-//  - Fix Open/GAP: fallback open from snapshot keys + AM open
+// Premarket/After:
+// - Realtime: AM WS cache (AM.*)  ✅ nhẹ + nhanh
+// - Enrich: REST snapshot + indicators 5m (optional)
+// - Gap% (RTH): Polygon daily aggs open/prevClose (best-effort)
+// - Float: FMP shares-float (best-effort, cached)
+// - AO filter: from 5m aggs (optional)
 // ============================================================================
 
 import "dotenv/config";
 import express from "express";
 import axios from "axios";
 import WebSocket from "ws";
-
-const WebSocketLib = WebSocket;
-const app = express();
-app.use(express.json());
 
 // ============================================================================
 // SECTION 00 — Brand
@@ -42,61 +31,65 @@ const BRAND = {
 };
 
 // ============================================================================
-// SECTION 01 — ENV
+// SECTION 01 — ENV / CONFIG
 // ============================================================================
 const PORT = Number(process.env.PORT || 3000);
 const DEBUG = String(process.env.DEBUG || "true").toLowerCase() === "true";
 
+// Massive REST
 const MASSIVE_API_KEY = String(process.env.MASSIVE_API_KEY || "").trim();
 const MASSIVE_AUTH_TYPE = String(process.env.MASSIVE_AUTH_TYPE || "query").trim(); // query | xapi | bearer
 const MASSIVE_QUERY_KEYNAME = String(process.env.MASSIVE_QUERY_KEYNAME || "apiKey").trim();
+const MASSIVE_MOVER_URL = String(process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks").trim();
+const MASSIVE_TICKER_SNAPSHOT_URL = String(process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers").trim();
+const MASSIVE_SNAPSHOT_ALL_URL = String(process.env.MASSIVE_SNAPSHOT_ALL_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers").trim();
+const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
 
-const UI_AUTO_REFRESH_MS = Math.max(0, Math.min(600000, Number(process.env.UI_AUTO_REFRESH_MS || 15000))); // 0 = off
+// Massive WS
+const MASSIVE_WS_URL = String(process.env.MASSIVE_WS_URL || "wss://socket.massive.com/stocks").trim();
+const ENABLE_HALT_WS = String(process.env.ENABLE_HALT_WS || "true").toLowerCase() === "true";
+const ENABLE_AM_WS = String(process.env.ENABLE_AM_WS || "true").toLowerCase() === "true";
+const AM_WS_SUBS = String(process.env.AM_WS_SUBS || "AM.*").trim();
+
+// UI / Limits
+const UI_AUTO_REFRESH_MS = Math.max(0, Math.min(600000, Number(process.env.UI_AUTO_REFRESH_MS || 15000)));
 const IMPORTANT_SYMBOLS = String(process.env.IMPORTANT_SYMBOLS || "NVDA,TSLA,AAPL,AMD,META").trim();
-
 const SYMBOL_DOT_TO_DASH = String(process.env.SYMBOL_DOT_TO_DASH || "false").toLowerCase() === "true";
+const SCAN_MAX_SYMBOLS = Math.max(20, Math.min(10000, Number(process.env.SCAN_MAX_SYMBOLS || 200)));
+const SCAN_HARD_MAX = Math.max(50, Math.min(10000, Number(process.env.SCAN_HARD_MAX || 1000)));
 
-const MASSIVE_MOVER_URL = String(
-  process.env.MASSIVE_MOVER_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks"
-).trim();
-
-const MASSIVE_TICKER_SNAPSHOT_URL = String(
-  process.env.MASSIVE_TICKER_SNAPSHOT_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
-).trim();
-
-const MASSIVE_SNAPSHOT_ALL_URL = String(
-  process.env.MASSIVE_SNAPSHOT_ALL_URL || "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
-).trim();
-
+// Snapshot-all mode (optional)
 const ENABLE_SNAPSHOT_ALL = String(process.env.ENABLE_SNAPSHOT_ALL || "false").toLowerCase() === "true";
 
-// Aggs (for 5m indicators + mini chart)
-const MASSIVE_AGGS_URL = String(process.env.MASSIVE_AGGS_URL || "https://api.massive.com/v2/aggs/ticker").trim();
+// Aggs / Indicators
 const AGGS_INCLUDE_PREPOST = String(process.env.AGGS_INCLUDE_PREPOST || "true").toLowerCase() === "true";
-
-// 5m indicators
 const ENABLE_5M_INDICATORS = String(process.env.ENABLE_5M_INDICATORS || "true").toLowerCase() === "true";
 const AGGS_5M_LIMIT = Math.max(40, Math.min(5000, Number(process.env.AGGS_5M_LIMIT || 120)));
 const VOL_SPIKE_MULT = Math.max(1.1, Math.min(10, Number(process.env.VOL_SPIKE_MULT || 1.5)));
 const VOL_AVG_LEN_5M = Math.max(5, Math.min(200, Number(process.env.VOL_AVG_LEN_5M || 20)));
-
-const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
 const SNAP_CONCURRENCY = Math.max(1, Math.min(10, Number(process.env.SNAP_CONCURRENCY || 4)));
+const INCLUDE_OTC = String(process.env.INCLUDE_OTC || "false").toLowerCase() === "true";
 
-const MASSIVE_WS_URL = String(process.env.MASSIVE_WS_URL || "wss://socket.massive.com/stocks").trim();
-const ENABLE_HALT_WS = String(process.env.ENABLE_HALT_WS || "true").toLowerCase() === "true";
+// AO Filter
+const ENABLE_AO_FILTER = String(process.env.ENABLE_AO_FILTER || "false").toLowerCase() === "true";
+const AO_MODE = String(process.env.AO_MODE || "above_zero").toLowerCase(); // above_zero | rising
 
-// AM WS fallback
-const ENABLE_AM_WS = String(process.env.ENABLE_AM_WS || "true").toLowerCase() === "true";
-const AM_WS_SUBS = String(process.env.AM_WS_SUBS || "AM.*").trim();
+// AM cache / enrich
 const AM_CACHE_MAX = Math.max(200, Math.min(20000, Number(process.env.AM_CACHE_MAX || 8000)));
-
-// AM enrich cache
-const AM_ENRICH_LIMIT = Math.max(50, Math.min(500, Number(process.env.AM_ENRICH_LIMIT || 200)));
+const AM_ENRICH_LIMIT = Math.max(50, Math.min(1000, Number(process.env.AM_ENRICH_LIMIT || 200)));
 const AM_ENRICH_TTL_MS = Math.max(5000, Math.min(300000, Number(process.env.AM_ENRICH_TTL_MS || 60000)));
 
 // Mini chart cache
 const MINI_CACHE_TTL_MS = Math.max(2000, Math.min(120000, Number(process.env.MINI_CACHE_TTL_MS || 15000)));
+
+// Polygon daily open/prevClose for RTH Gap%
+const POLYGON_BASE_URL = String(process.env.POLYGON_BASE_URL || "https://api.polygon.io").trim();
+const POLYGON_API_KEY = String(process.env.POLYGON_API_KEY || process.env.MASSIVE_API_KEY || "").trim();
+
+// Float enrich (FMP)
+const ENABLE_FLOAT_ENRICH = String(process.env.ENABLE_FLOAT_ENRICH || "false").toLowerCase() === "true";
+const FMP_API_KEY = String(process.env.FMP_API_KEY || "").trim();
+const FLOAT_TTL_MS = Math.max(60_000, Math.min(7 * 86400000, Number(process.env.FLOAT_TTL_MS || 86400000)));
 
 if (!MASSIVE_API_KEY || !MASSIVE_MOVER_URL || !MASSIVE_TICKER_SNAPSHOT_URL) {
   console.error("❌ Missing ENV. Required:");
@@ -107,8 +100,15 @@ if (!MASSIVE_API_KEY || !MASSIVE_MOVER_URL || !MASSIVE_TICKER_SNAPSHOT_URL) {
 }
 
 // ============================================================================
-// SECTION 02 — Helpers
+// SECTION 02 — App + Helpers
 // ============================================================================
+const app = express();
+app.use(express.json());
+
+function dlog(...args) {
+  if (DEBUG) console.log(...args);
+}
+
 function envMissingFor({ needSnapshotAll = false, needAggs = false } = {}) {
   const miss = [];
   if (!MASSIVE_API_KEY) miss.push("MASSIVE_API_KEY");
@@ -129,6 +129,7 @@ function auth(params = {}, headers = {}) {
   headers["user-agent"] =
     headers["user-agent"] ||
     "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari/537.36";
+
   return { params, headers };
 }
 
@@ -146,12 +147,12 @@ function clamp(x, a, b) {
 function normalizeSymbolForAPI(sym) {
   const s = String(sym || "").trim().toUpperCase();
   if (!s) return "";
-  if (SYMBOL_DOT_TO_DASH) return s.replace(/\./g, "-"); // BRK.B => BRK-B
-  return s;
+  return SYMBOL_DOT_TO_DASH ? s.replace(/\./g, "-") : s;
 }
 function parseSymbols(input) {
   return String(input || "")
-    .replace(/\n/g, ",")
+    .replace(/[\n\r\t;]/g, ",")
+    .replace(/\s+/g, "")
     .split(",")
     .map((s) => normalizeSymbolForAPI(s))
     .filter(Boolean);
@@ -179,13 +180,13 @@ function ymd(d) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-// ===== Session time (NY) =====
+// Session time (NY)
 function toMs(ts) {
   const x = n(ts);
   if (x === null) return null;
-  if (x > 1e14) return Math.floor(x / 1e6);
-  if (x > 1e12) return Math.floor(x);
-  if (x > 1e9) return Math.floor(x * 1000);
+  if (x > 1e14) return Math.floor(x / 1e6); // ns -> ms
+  if (x > 1e12) return Math.floor(x); // ms
+  if (x > 1e9) return Math.floor(x * 1000); // s -> ms
   return null;
 }
 function nyHM(ms) {
@@ -211,6 +212,22 @@ function sessionOfMs(ms) {
   if (mins >= 9 * 60 + 30 && mins < 16 * 60) return "rth";
   if (mins >= 16 * 60 && mins < 20 * 60) return "after";
   return "off";
+}
+
+// group helpers (hay bị “mất”)
+function groupToDirection(group) {
+  if (String(group || "").trim() === "topLosers") return "losers";
+  return "gainers";
+}
+function sortRowsByGroup(rows, group) {
+  if (!Array.isArray(rows)) return;
+  if (group === "topGappers") rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
+  else rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
+}
+function capPass(row, cap) {
+  const want = String(cap || "all").toLowerCase();
+  if (want === "all" || want === "") return true;
+  return String(row?.cap || "").toLowerCase() === want;
 }
 
 // ============================================================================
@@ -240,6 +257,13 @@ async function safeGet(url, { params, headers }) {
 // ============================================================================
 // SECTION 04 — Massive REST
 // ============================================================================
+function readRowsFromAnySnapshotShape(data) {
+  if (Array.isArray(data?.tickers)) return data.tickers;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.data)) return data.data;
+  return [];
+}
+
 async function fetchMovers(direction = "gainers") {
   const d = String(direction || "gainers").toLowerCase().trim();
   const directionSafe = d === "losers" ? "losers" : "gainers";
@@ -252,14 +276,7 @@ async function fetchMovers(direction = "gainers") {
   const a = auth(params, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
 
-  const rows = Array.isArray(r.data?.tickers)
-    ? r.data.tickers
-    : Array.isArray(r.data?.results)
-    ? r.data.results
-    : Array.isArray(r.data?.data)
-    ? r.data.data
-    : [];
-
+  const rows = readRowsFromAnySnapshotShape(r.data);
   return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows, errorDetail: r.errorDetail };
 }
 
@@ -276,19 +293,12 @@ async function fetchSnapshotAll() {
   const a = auth({}, {});
   const r = await safeGet(url, { params: a.params, headers: a.headers });
 
-  const rows = Array.isArray(r.data?.tickers)
-    ? r.data.tickers
-    : Array.isArray(r.data?.results)
-    ? r.data.results
-    : Array.isArray(r.data?.data)
-    ? r.data.data
-    : [];
-
+  const rows = readRowsFromAnySnapshotShape(r.data);
   return { ok: r.ok && Array.isArray(rows), url, status: r.status, rows, errorDetail: r.errorDetail };
 }
 
 // Aggs cache
-const aggsCache = new Map();
+const aggsCache = new Map(); // key -> {ts, bars}
 async function fetchAggs(sym, tf = "1", limit = 300, sort = "asc") {
   const ticker = String(sym || "").trim().toUpperCase();
   const cacheKey = `${ticker}|${tf}|${sort}|${limit}`;
@@ -309,6 +319,7 @@ async function fetchAggs(sym, tf = "1", limit = 300, sort = "asc") {
   const bars = Array.isArray(r.data?.results) ? r.data.results : [];
   const ok = r.ok && bars.length > 0;
   if (ok) aggsCache.set(cacheKey, { ts: now, bars });
+
   return { ok, url, status: r.status, bars, errorDetail: r.errorDetail };
 }
 async function fetchAggs5m(sym) {
@@ -316,7 +327,7 @@ async function fetchAggs5m(sym) {
 }
 
 // ============================================================================
-// SECTION 05 — Normalize Snapshot (OPEN/GAP fix)
+// SECTION 05 — Normalize Snapshot (Open/Gap best-effort)
 // ============================================================================
 function findFirstNumberByKeys(obj, candidateKeys, maxNodes = 6000) {
   if (!obj || typeof obj !== "object") return { value: null };
@@ -391,8 +402,6 @@ function normalizeSnapshotAuto(ticker, snap) {
     null;
 
   if (price === null) price = findFirstNumberByKeys(root, ["price", "last", "p", "c", "close"]).value;
-
-  // ✅ OPEN fallback (reduce null)
   if (open === null) open = findFirstNumberByKeys(root, ["open", "o", "dayopen", "openprice"]).value;
 
   let prevClose = prevClose0;
@@ -402,7 +411,6 @@ function normalizeSnapshotAuto(ticker, snap) {
   if (pricePct === null && price !== null && prevClose !== null && prevClose > 0) {
     pricePct = ((price - prevClose) / prevClose) * 100;
   }
-
   const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : null;
 
   let floatShares =
@@ -439,7 +447,6 @@ function normalizeSnapshotAuto(ticker, snap) {
     marketCap: marketCapFinal !== null ? Math.round(marketCapFinal) : null,
     marketCapB: marketCapFinal !== null ? round2(marketCapFinal / 1_000_000_000) : null,
     cap: capCategory(marketCapFinal),
-    marketCapSource: marketCap !== null ? "api" : marketCapEst !== null ? "est_float" : null,
   };
 }
 
@@ -450,15 +457,77 @@ function addExtPctFromPrevClose(row) {
   return { ...row, extPct: extPct !== null ? round2(extPct) : null };
 }
 
-function capPass(row, cap) {
-  const c = String(cap || "all").toLowerCase();
-  if (c === "all") return true;
-  if (!row.cap) return false;
-  return row.cap === c;
+// ============================================================================
+// SECTION 05.5 — Float Enrich (FMP) (best-effort, cached)
+// ============================================================================
+const floatCache = new Map(); // sym -> {ts, floatShares}
+async function fetchFloatSharesFMP(sym) {
+  if (!ENABLE_FLOAT_ENRICH) return { ok: false, floatShares: null, reason: "disabled" };
+  const ticker = String(sym || "").trim().toUpperCase();
+  if (!ticker) return { ok: false, floatShares: null, reason: "no_symbol" };
+  if (!FMP_API_KEY) return { ok: false, floatShares: null, reason: "missing_FMP_API_KEY" };
+
+  const hit = floatCache.get(ticker);
+  if (hit && Date.now() - hit.ts < FLOAT_TTL_MS) return { ok: true, floatShares: hit.floatShares, cached: true };
+
+  // FMP “stable” endpoint
+  const url = `https://financialmodelingprep.com/stable/shares-float`;
+  const r = await safeGet(url, {
+    params: { symbol: ticker, apikey: FMP_API_KEY },
+    headers: { "user-agent": "ALGTP" },
+  });
+
+  const arr = Array.isArray(r.data) ? r.data : Array.isArray(r.data?.data) ? r.data.data : [];
+  const row = arr && arr.length ? arr[0] : null;
+
+  // field names can vary; try multiple
+  const fs =
+    n(row?.floatShares) ??
+    n(row?.float) ??
+    n(row?.sharesFloat) ??
+    n(row?.freeFloat) ??
+    null;
+
+  if (!r.ok || fs === null) return { ok: false, floatShares: null, detail: r.errorDetail || r.data };
+
+  floatCache.set(ticker, { ts: Date.now(), floatShares: Math.round(fs) });
+  return { ok: true, floatShares: Math.round(fs), cached: false };
+}
+
+async function enrichRowsWithFloat(rows, maxN = 200) {
+  if (!ENABLE_FLOAT_ENRICH) return rows;
+  const top = rows.slice(0, maxN);
+
+  const need = top
+    .filter((r) => r && (r.floatShares == null || r.floatM == null))
+    .map((r) => r.symbol)
+    .filter(Boolean);
+
+  const uniq = Array.from(new Set(need));
+  if (!uniq.length) return rows;
+
+  const fetched = await mapPool(uniq, Math.min(6, SNAP_CONCURRENCY), async (sym) => {
+    const x = await fetchFloatSharesFMP(sym);
+    return { sym, ...x };
+  });
+
+  const map = new Map(fetched.filter((x) => x.ok && x.floatShares != null).map((x) => [x.sym, x.floatShares]));
+
+  return rows.map((r) => {
+    const fs = map.get(r.symbol);
+    if (!fs) return r;
+    return {
+      ...r,
+      floatShares: r.floatShares ?? fs,
+      floatM: r.floatM ?? round2(fs / 1_000_000),
+      floatCat: r.floatCat ?? floatCategory(fs),
+      floatSource: "FMP",
+    };
+  });
 }
 
 // ============================================================================
-// SECTION 06 — ALGTP Signals
+// SECTION 06 — Signals (icons)
 // ============================================================================
 function demandScore(row) {
   const gap = Math.abs(n(row?.gapPct) ?? 0);
@@ -471,6 +540,7 @@ function demandScore(row) {
   if (pc >= 10) s += 1;
   if (pc >= 20) s += 1;
   if (row?.aboveVWAP_5m && row?.volSpike_5m) s += 1;
+
   return clamp(s, 0, 5);
 }
 function signalIcon(d) {
@@ -489,20 +559,20 @@ function paSignalIcon(row) {
 }
 
 // ============================================================================
-// SECTION 07 — 5m Indicator engine (VWAP etc)
+// SECTION 07 — Indicators (EMA/SMA/VWAP) + AO
 // ============================================================================
-function computeSMA(closes, len) {
-  if (!Array.isArray(closes) || closes.length < len) return null;
+function computeSMA(arr, len) {
+  if (!Array.isArray(arr) || arr.length < len) return null;
   let sum = 0;
-  for (let i = closes.length - len; i < closes.length; i++) sum += closes[i];
+  for (let i = arr.length - len; i < arr.length; i++) sum += arr[i];
   return sum / len;
 }
-function computeEMA(closes, len) {
-  if (!Array.isArray(closes) || closes.length < len) return null;
+function computeEMA(arr, len) {
+  if (!Array.isArray(arr) || arr.length < len) return null;
   const k = 2 / (len + 1);
-  let ema = computeSMA(closes.slice(0, len), len);
+  let ema = computeSMA(arr.slice(0, len), len);
   if (ema === null) return null;
-  for (let i = len; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
+  for (let i = len; i < arr.length; i++) ema = arr[i] * k + ema * (1 - k);
   return ema;
 }
 function computeVWAP(closes, volumes) {
@@ -524,7 +594,8 @@ function computeAvg(arr) {
   for (const x of arr) {
     const v = n(x);
     if (v === null) continue;
-    s += v; c++;
+    s += v;
+    c++;
   }
   if (c === 0) return null;
   return s / c;
@@ -534,9 +605,13 @@ function indicatorsFromAggs5m(barsDesc) {
   if (!Array.isArray(barsDesc) || barsDesc.length === 0) {
     return { sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
   }
-
   const bars = barsDesc
-    .map((b) => ({ c: n(b?.c ?? b?.close), v: n(b?.v ?? b?.volume) }))
+    .map((b) => ({
+      c: n(b?.c ?? b?.close),
+      v: n(b?.v ?? b?.volume),
+      h: n(b?.h ?? b?.high),
+      l: n(b?.l ?? b?.low),
+    }))
     .filter((x) => x.c !== null)
     .slice(0, 600);
 
@@ -560,7 +635,31 @@ function indicatorsFromAggs5m(barsDesc) {
     vwap_5m: vwap !== null ? round2(vwap) : null,
     lastVol_5m: lastVol !== null ? Math.round(lastVol) : null,
     avgVol_5m: avgVol !== null ? Math.round(avgVol) : null,
+    _bars5m_forAO: bars, // keep for AO
   };
+}
+
+function computeAOFrom5mBars(bars) {
+  // AO = SMA(5, median) - SMA(34, median)
+  if (!Array.isArray(bars) || bars.length < 34) return { ao: null, aoPrev: null };
+  const med = bars
+    .filter((b) => n(b?.h) !== null && n(b?.l) !== null)
+    .map((b) => (Number(b.h) + Number(b.l)) / 2)
+    .reverse();
+
+  if (med.length < 35) return { ao: null, aoPrev: null };
+
+  const smaAt = (arr, len, idx) => {
+    if (idx + len > arr.length) return null;
+    let s = 0;
+    for (let i = idx; i < idx + len; i++) s += arr[i];
+    return s / len;
+  };
+
+  const aoNow = smaAt(med, 5, 0) - smaAt(med, 34, 0);
+  const aoPrev = smaAt(med, 5, 1) - smaAt(med, 34, 1);
+
+  return { ao: aoNow !== null ? round2(aoNow) : null, aoPrev: aoPrev !== null ? round2(aoPrev) : null };
 }
 
 function attach5mSignals(row) {
@@ -580,6 +679,16 @@ function attach5mSignals(row) {
   };
 }
 
+function aoPass(row) {
+  if (!ENABLE_AO_FILTER) return true;
+  const ao = n(row?.ao);
+  const aoPrev = n(row?.aoPrev);
+  if (ao === null) return false;
+  if (AO_MODE === "above_zero") return ao > 0;
+  if (AO_MODE === "rising") return aoPrev !== null && ao > aoPrev;
+  return true;
+}
+
 async function attachIndicatorsIfEnabled(rows) {
   if (!ENABLE_5M_INDICATORS) return { rows, aggsErrors: [] };
 
@@ -588,23 +697,34 @@ async function attachIndicatorsIfEnabled(rows) {
     const a = await fetchAggs5m(r.symbol);
     if (!a.ok) {
       aggsErrors.push({ ticker: r.symbol, status: a.status, url: a.url, errorDetail: a.errorDetail });
-      return { symbol: r.symbol, sma26_5m: null, ema9_5m: null, ema34_5m: null, vwap_5m: null, lastVol_5m: null, avgVol_5m: null };
+      return { symbol: r.symbol };
     }
-    return { symbol: r.symbol, ...indicatorsFromAggs5m(a.bars) };
+    const base = indicatorsFromAggs5m(a.bars);
+    const aoData = computeAOFrom5mBars(base._bars5m_forAO || []);
+    delete base._bars5m_forAO;
+    return { symbol: r.symbol, ...base, ...aoData };
   });
 
   const mapInd = new Map(ind.map((x) => [x.symbol, x]));
   let out = rows.map((r) => ({ ...r, ...(mapInd.get(r.symbol) || {}) }));
   out = out.map(attach5mSignals);
+
+  // AO filter (optional)
+  if (ENABLE_AO_FILTER) out = out.filter(aoPass);
+
   return { rows: out, aggsErrors };
 }
 
 // ============================================================================
-// SECTION 08 — HALT WS (LULD.*) + /halts
+// SECTION 08 — HALT WS + /halts
 // ============================================================================
-const haltedMap = new Map();
-function setHalt(sym) { haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: Date.now(), reason: "LULD" }); }
-function setResume(sym) { haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: Date.now(), reason: "LULD" }); }
+const haltedMap = new Map(); // sym -> { halted, lastEvent, tsMs, reason }
+function setHalt(sym) {
+  haltedMap.set(sym, { halted: true, lastEvent: "HALT", tsMs: Date.now(), reason: "LULD" });
+}
+function setResume(sym) {
+  haltedMap.set(sym, { halted: false, lastEvent: "RESUME", tsMs: Date.now(), reason: "LULD" });
+}
 
 function handleLULD(payload) {
   const msgs = Array.isArray(payload) ? payload : [payload];
@@ -624,10 +744,10 @@ function handleLULD(payload) {
 
 function startHaltWebSocket() {
   if (!ENABLE_HALT_WS) return;
-  if (!WebSocketLib) return console.log("⚠️ HALT WS disabled: npm i ws");
+  if (!WebSocket) return console.log("⚠️ HALT WS disabled: npm i ws");
   if (!MASSIVE_API_KEY) return console.log("⚠️ HALT WS disabled: missing MASSIVE_API_KEY");
 
-  const ws = new WebSocketLib(MASSIVE_WS_URL);
+  const ws = new WebSocket(MASSIVE_WS_URL);
   let subscribed = false;
 
   ws.on("open", () => {
@@ -662,12 +782,11 @@ function attachHaltFlag(row) {
   const sym = String(row?.symbol || "").trim().toUpperCase();
   if (!sym) return row;
   const x = haltedMap.get(sym);
-  const halted = Boolean(x?.halted);
-  return { ...row, halted, haltIcon: halted ? "⛔" : "", haltReason: x?.reason || null, lastEvent: x?.lastEvent || null, haltTsMs: x?.tsMs || null };
+  return { ...row, halted: Boolean(x?.halted), haltIcon: x?.halted ? "⛔" : "", haltTsMs: x?.tsMs ?? null };
 }
 
 app.get("/halts", (req, res) => {
-  const only = String(req.query.only || "all").toLowerCase();
+  const only = String(req.query.only || "all").toLowerCase(); // all|halted
   const out = [];
   for (const [symbol, v] of haltedMap.entries()) {
     if (only === "halted" && !v.halted) continue;
@@ -678,9 +797,12 @@ app.get("/halts", (req, res) => {
 });
 
 // ============================================================================
-// SECTION 09 — AM WS (minute aggregates) + enrich cache (OPEN fallback)
+// SECTION 09 — AM WS (minute aggregates) + enrich cache + DAILY OPEN (Gap%)
 // ============================================================================
-const amMap = new Map();
+
+// ---------- AM WS cache ----------
+const amMap = new Map(); // sym -> AM payload
+
 function trimAMCache() {
   if (amMap.size <= AM_CACHE_MAX) return;
   const arr = Array.from(amMap.entries());
@@ -688,6 +810,7 @@ function trimAMCache() {
   const drop = arr.length - AM_CACHE_MAX;
   for (let i = 0; i < drop; i++) amMap.delete(arr[i][0]);
 }
+
 function handleAMPayload(payload) {
   const msgs = Array.isArray(payload) ? payload : [payload];
   for (const m of msgs) {
@@ -702,12 +825,13 @@ function handleAMPayload(payload) {
     trimAMCache();
   }
 }
+
 function startAMWebSocket() {
   if (!ENABLE_AM_WS) return;
-  if (!WebSocketLib) return console.log("⚠️ AM WS disabled: npm i ws");
+  if (!WebSocket) return console.log("⚠️ AM WS disabled: npm i ws");
   if (!MASSIVE_API_KEY) return console.log("⚠️ AM WS disabled: missing MASSIVE_API_KEY");
 
-  const ws = new WebSocketLib(MASSIVE_WS_URL);
+  const ws = new WebSocket(MASSIVE_WS_URL);
   let subscribed = false;
 
   ws.on("open", () => {
@@ -726,6 +850,7 @@ function startAMWebSocket() {
         ws.send(JSON.stringify({ action: "subscribe", params: AM_WS_SUBS }));
         console.log(`✅ AM WS auth_success → subscribed: ${AM_WS_SUBS}`);
       }
+
       handleAMPayload(parsed);
     } catch {}
   });
@@ -738,8 +863,8 @@ function startAMWebSocket() {
   ws.on("error", (err) => console.log("⚠️ AM WS error:", String(err?.message || err)));
 }
 
-// enrich cache
-const amSnapCache = new Map();
+// ---------- AM enrich snapshot cache ----------
+const amSnapCache = new Map(); // sym -> {ts,row}
 function getSnapCached(sym) {
   const hit = amSnapCache.get(sym);
   if (!hit) return null;
@@ -752,7 +877,7 @@ function setSnapCached(sym, row) {
 
 function normalizeFromAMOnly(sym, am) {
   const price = n(am?.c) ?? null;
-  const op = n(am?.op) ?? null; // ✅ open fallback from AM
+  const op = n(am?.op) ?? null; // AM "open" (minute)
   const extPct = price !== null && op !== null && op > 0 ? ((price - op) / op) * 100 : null;
   const vol = n(am?.av) ?? n(am?.v) ?? null;
   const ms = toMs(am?.e) || toMs(am?.s);
@@ -760,7 +885,7 @@ function normalizeFromAMOnly(sym, am) {
   return {
     symbol: sym,
     price: price !== null ? round2(price) : null,
-    open: op !== null ? round2(op) : null,
+    open: op !== null ? round2(op) : null, // keep for fallback
     pricePct: null,
     gapPct: null,
     extPct: extPct !== null ? round2(extPct) : null,
@@ -777,22 +902,23 @@ function mergeAMWithSnapshot(amRow, snapRow) {
   const price = n(amRow?.price) ?? n(snapRow?.price);
   const prevClose = n(snapRow?.prevClose);
 
+  // open: snapshot first, fallback to AM open
   let open = n(snapRow?.open);
   if (open === null) open = n(amRow?.open);
 
   const pricePct = price !== null && prevClose !== null && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : n(snapRow?.pricePct);
   const gapPct = open !== null && prevClose !== null && prevClose > 0 ? ((open - prevClose) / prevClose) * 100 : n(snapRow?.gapPct);
-
   const extPct = price !== null && prevClose !== null && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : n(amRow?.extPct);
 
   const volA = n(amRow?.volume);
   const volS = n(snapRow?.volume);
-  const volume = volA !== null && volS !== null ? Math.max(volA, volS) : (volA ?? volS ?? null);
+  const volume = volA !== null && volS !== null ? Math.max(volA, volS) : volA ?? volS ?? null;
 
   return {
     ...snapRow,
     price: price !== null ? round2(price) : null,
-    open: open !== null ? round2(open) : (snapRow?.open ?? null),
+    open: open !== null ? round2(open) : snapRow?.open ?? null,
+    prevClose: prevClose !== null ? round2(prevClose) : snapRow?.prevClose ?? null,
     pricePct: pricePct !== null ? round2(pricePct) : null,
     gapPct: gapPct !== null ? round2(gapPct) : null,
     extPct: extPct !== null ? round2(extPct) : null,
@@ -802,8 +928,97 @@ function mergeAMWithSnapshot(amRow, snapRow) {
   };
 }
 
+// ---------- DAILY OPEN/PREVCLOSE (Polygon aggs) to compute GAP% ----------
+const dailyOpenCache = new Map(); // sym -> {ymd, open, prevClose, ts}
+
+function todayYMD_NY() {
+  try {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+
+    const y = parts.find((p) => p.type === "year")?.value || "1970";
+    const m = parts.find((p) => p.type === "month")?.value || "01";
+    const d = parts.find((p) => p.type === "day")?.value || "01";
+    return `${y}-${m}-${d}`;
+  } catch {
+    return ymd(new Date());
+  }
+}
+
+async function fetchDailyOpenPrevClose(sym) {
+  const ticker = String(sym || "").trim().toUpperCase();
+  if (!ticker) return { ok: false, open: null, prevClose: null };
+
+  const ymdNY = todayYMD_NY();
+  const hit = dailyOpenCache.get(ticker);
+  if (hit && hit.ymd === ymdNY && Date.now() - hit.ts < 6 * 60 * 60 * 1000) {
+    return { ok: true, open: hit.open, prevClose: hit.prevClose, cached: true };
+  }
+
+  if (!POLYGON_API_KEY) return { ok: false, open: null, prevClose: null, error: "missing POLYGON_API_KEY" };
+
+  const base = POLYGON_BASE_URL.replace(/\/+$/, "");
+  const to = ymdNY;
+  const from = ymd(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)); // buffer for weekends/holidays
+  const url = `${base}/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${from}/${to}`;
+
+  const r = await safeGet(url, {
+    params: { adjusted: "true", sort: "asc", limit: "10", apiKey: POLYGON_API_KEY },
+    headers: { "user-agent": "ALGTP" },
+  });
+
+  const bars = Array.isArray(r.data?.results) ? r.data.results : [];
+  if (!r.ok || bars.length < 1) return { ok: false, open: null, prevClose: null, detail: r.errorDetail || r.data };
+
+  const last = bars[bars.length - 1];
+  const prev = bars.length >= 2 ? bars[bars.length - 2] : null;
+
+  const open = n(last?.o);
+  const prevClose = n(prev?.c) ?? n(last?.c) ?? null;
+
+  dailyOpenCache.set(ticker, { ymd: ymdNY, open: open ?? null, prevClose, ts: Date.now() });
+  return { ok: true, open: open ?? null, prevClose, cached: false };
+}
+
+async function enrichRowsWithDailyOpen(rows, maxN = 120) {
+  const top = rows.slice(0, maxN);
+  const need = top
+    .filter((r) => r && (r.open == null || r.prevClose == null || r.gapPct == null))
+    .map((r) => r.symbol)
+    .filter(Boolean);
+
+  const uniq = Array.from(new Set(need));
+  if (!uniq.length) return rows;
+
+  const fetched = await mapPool(uniq, Math.min(6, SNAP_CONCURRENCY), async (sym) => {
+    const x = await fetchDailyOpenPrevClose(sym);
+    return { sym, ...x };
+  });
+
+  const map = new Map(fetched.filter((x) => x.ok).map((x) => [x.sym, x]));
+
+  return rows.map((r) => {
+    const x = map.get(r.symbol);
+    if (!x) return r;
+
+    const open = r.open ?? (x.open != null ? round2(x.open) : null);
+    const prevClose = r.prevClose ?? (x.prevClose != null ? round2(x.prevClose) : null);
+    const gapPct =
+      open != null && prevClose != null && prevClose > 0
+        ? round2(((open - prevClose) / prevClose) * 100)
+        : r.gapPct;
+
+    return { ...r, open, prevClose, gapPct, gapSource: "daily_aggs" };
+  });
+}
+
 // ============================================================================
-// SECTION 10 — Builders
+// SECTION 10 — Builders (SnapshotAll + AM fallback) + finalizeRows
 // ============================================================================
 function finalizeRows(rows) {
   let out = rows.map((r) => {
@@ -814,18 +1029,13 @@ function finalizeRows(rows) {
   return out;
 }
 
-function groupToDirection(group) {
-  if (group === "topLosers") return "losers";
-  return "gainers";
-}
-function sortRowsByGroup(rows, group) {
-  if (group === "topGappers") rows.sort((a, b) => Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0));
-  else rows.sort((a, b) => Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0));
-}
-
 async function buildRowsFromSnapshotAll({ cap, limit, session }) {
   if (!ENABLE_SNAPSHOT_ALL) {
-    return { ok: false, status: 403, body: { ok: false, error: "Snapshot-All is OFF", hint: "Set ENABLE_SNAPSHOT_ALL=true or use AM WS fallback." } };
+    return {
+      ok: false,
+      status: 403,
+      body: { ok: false, error: "Snapshot-All is OFF", hint: "Set ENABLE_SNAPSHOT_ALL=true or use AM WS fallback." },
+    };
   }
 
   const miss = envMissingFor({ needSnapshotAll: true, needAggs: ENABLE_5M_INDICATORS });
@@ -847,6 +1057,7 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
     rows.push(r);
   }
 
+  // session filter from snapshot timestamps
   if (session) {
     rows = rows.filter((r) => {
       const raw = snapMap.get(r.symbol);
@@ -858,12 +1069,20 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
 
   rows = rows.filter((r) => capPass(r, cap));
 
+  // ✅ fill open/gap using daily aggs (top N)
+  rows = await enrichRowsWithDailyOpen(rows, 200);
+
+  // ✅ float enrich (optional)
+  rows = await enrichRowsWithFloat(rows, 200);
+
   const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
   rows = finalizeRows(withInd);
 
+  // sort: gap first
   rows.sort(
     (a, b) =>
       Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
+      Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
       Math.abs(b.pricePct ?? 0) - Math.abs(a.pricePct ?? 0) ||
       (b.volume ?? 0) - (a.volume ?? 0)
   );
@@ -871,7 +1090,18 @@ async function buildRowsFromSnapshotAll({ cap, limit, session }) {
   const lim = clamp(Number(limit || 100), 5, 500);
   rows = rows.slice(0, lim);
 
-  return { ok: true, status: 200, body: { ok: true, source: "SNAPSHOT_ALL", session: session || null, cap, results: rows, aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined } };
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      ok: true,
+      source: "SNAPSHOT_ALL",
+      session: session || null,
+      cap,
+      results: rows,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
+    },
+  };
 }
 
 async function buildRowsFromAMCache({ cap, limit, session }) {
@@ -882,10 +1112,15 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
     if (session && sessionOfMs(ms) !== session) continue;
     base.push(normalizeFromAMOnly(sym, am));
   }
-  if (!base.length) return { ok: true, status: 200, body: { ok: true, source: "AM_WS", session, cap, results: [] } };
+
+  if (!base.length) {
+    return { ok: true, status: 200, body: { ok: true, source: "AM_WS", session, cap, results: [] } };
+  }
 
   const needCap = String(cap || "all").toLowerCase() !== "all";
-  const candidates = [...base].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0));
+  const candidates = [...base].sort(
+    (a, b) => (b.volume ?? 0) - (a.volume ?? 0) || Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0)
+  );
   const pick = candidates.slice(0, AM_ENRICH_LIMIT).map((x) => x.symbol);
 
   const toFetch = pick.filter((sym) => !getSnapCached(sym));
@@ -906,6 +1141,12 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
 
   if (needCap) rows = rows.filter((r) => capPass(r, cap));
 
+  // ✅ fill open/gap using daily aggs (top N)
+  rows = await enrichRowsWithDailyOpen(rows, 200);
+
+  // ✅ float enrich (optional)
+  rows = await enrichRowsWithFloat(rows, 200);
+
   const lim = clamp(Number(limit || 100), 5, 500);
 
   rows.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
@@ -918,17 +1159,29 @@ async function buildRowsFromAMCache({ cap, limit, session }) {
     (a, b) =>
       Math.abs(b.gapPct ?? 0) - Math.abs(a.gapPct ?? 0) ||
       (b.demandScore ?? 0) - (a.demandScore ?? 0) ||
+      Math.abs(b.extPct ?? 0) - Math.abs(a.extPct ?? 0) ||
       (b.volume ?? 0) - (a.volume ?? 0)
   );
   rows = rows.slice(0, lim);
 
-  return { ok: true, status: 200, body: { ok: true, source: "AM_FALLBACK", session, cap, results: rows, aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined } };
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      ok: true,
+      source: "AM_FALLBACK",
+      session,
+      cap,
+      results: rows,
+      aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
+    },
+  };
 }
 
 // ============================================================================
 // SECTION 11 — Mini Chart endpoint (hover)
 // ============================================================================
-const miniCache = new Map();
+const miniCache = new Map(); // key -> {ts, payload}
 
 function smaSeries(values, len) {
   const out = Array(values.length).fill(null);
@@ -957,7 +1210,8 @@ function emaSeries(values, len) {
 }
 function vwapSeries(closes, vols) {
   const out = Array(closes.length).fill(null);
-  let pv = 0, vv = 0;
+  let pv = 0,
+    vv = 0;
   for (let i = 0; i < closes.length; i++) {
     const c = closes[i];
     const v = vols[i] || 0;
@@ -1052,9 +1306,12 @@ app.get("/api", (req, res) => {
       haltWs: ENABLE_HALT_WS,
       amWs: ENABLE_AM_WS,
       amSubs: AM_WS_SUBS,
+      amCacheSize: amMap.size,
+      amSnapCacheSize: amSnapCache.size,
+      miniCacheSize: miniCache.size,
       uiAutoRefreshMs: UI_AUTO_REFRESH_MS,
-      importantSymbols: IMPORTANT_SYMBOLS,
-      symbolDotToDash: SYMBOL_DOT_TO_DASH,
+      polygonKey: Boolean(POLYGON_API_KEY),
+      floatEnrich: ENABLE_FLOAT_ENRICH,
     },
   });
 });
@@ -1064,7 +1321,18 @@ app.get("/scan", async (req, res) => {
     const miss = envMissingFor({ needAggs: ENABLE_5M_INDICATORS });
     if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
-    const symbols = parseSymbols(req.query.symbols || IMPORTANT_SYMBOLS).slice(0, 250);
+    const ALL = parseSymbols(req.query.symbols || IMPORTANT_SYMBOLS);
+
+    const MAX_FROM_UI = Number(req.query.max);
+    const ENV_MAX = Number(process.env.SCAN_MAX_SYMBOLS || SCAN_MAX_SYMBOLS);
+    const HARD_MAX = Number(process.env.SCAN_HARD_MAX || SCAN_HARD_MAX);
+
+    const maxN = (() => {
+      const base = Number.isFinite(MAX_FROM_UI) ? MAX_FROM_UI : ENV_MAX;
+      return Math.max(20, Math.min(HARD_MAX, Math.floor(base)));
+    })();
+
+    const symbols = ALL.slice(0, maxN);
 
     const snaps = await mapPool(symbols, SNAP_CONCURRENCY, async (t) => {
       const r = await fetchTickerSnapshot(t);
@@ -1076,7 +1344,13 @@ app.get("/scan", async (req, res) => {
 
     let rows = good.map((x) => normalizeSnapshotAuto(x.ticker, x.data)).map(addExtPctFromPrevClose);
 
-    // ✅ keep symbols even if snapshot failed (avoid 0 rows)
+    // ✅ fill open/gap using daily aggs (top N)
+    rows = await enrichRowsWithDailyOpen(rows, 200);
+
+    // ✅ float enrich (optional)
+    rows = await enrichRowsWithFloat(rows, 200);
+
+    // keep symbols even if snapshot failed (avoid 0 rows)
     const badRows = bad.map((x) => ({
       symbol: x.ticker,
       price: null,
@@ -1094,6 +1368,7 @@ app.get("/scan", async (req, res) => {
       paIcon: "",
       source: "SNAP_FAIL",
     }));
+
     rows = rows.concat(badRows);
 
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
@@ -1104,8 +1379,11 @@ app.get("/scan", async (req, res) => {
     res.json({
       ok: true,
       mode: "symbols",
+      scanned: symbols.length,
       results: rows,
-      snapshotErrors: DEBUG ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail })) : undefined,
+      snapshotErrors: DEBUG
+        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
+        : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
   } catch (e) {
@@ -1118,7 +1396,7 @@ app.get("/list", async (req, res) => {
     const miss = envMissingFor({ needAggs: ENABLE_5M_INDICATORS });
     if (miss.length) return res.status(400).json({ ok: false, error: "Missing env", miss });
 
-    const group = String(req.query.group || "topGainers").trim();
+    const group = String(req.query.group || "topGainers").trim(); // topGainers|topLosers|topGappers
     const cap = String(req.query.cap || "all").trim().toLowerCase();
     const limit = clamp(Number(req.query.limit || 50), 5, 200);
     const minGap = n(req.query.minGap);
@@ -1149,6 +1427,12 @@ app.get("/list", async (req, res) => {
 
     rows = rows.slice(0, limit);
 
+    // ✅ fill open/gap using daily aggs (top N)
+    rows = await enrichRowsWithDailyOpen(rows, 200);
+
+    // ✅ float enrich (optional)
+    rows = await enrichRowsWithFloat(rows, 200);
+
     const { rows: withInd, aggsErrors } = await attachIndicatorsIfEnabled(rows);
     rows = finalizeRows(withInd);
     sortRowsByGroup(rows, group);
@@ -1160,7 +1444,9 @@ app.get("/list", async (req, res) => {
       cap,
       limitRequested: limit,
       results: rows,
-      snapshotErrors: DEBUG ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail })) : undefined,
+      snapshotErrors: DEBUG
+        ? bad.slice(0, 10).map((x) => ({ ticker: x.ticker, status: x.status, url: x.url, errorDetail: x.errorDetail }))
+        : undefined,
       aggsErrors: DEBUG ? aggsErrors.slice(0, 10) : undefined,
     });
   } catch (e) {
@@ -1183,6 +1469,7 @@ app.get("/premarket", async (req, res) => {
     const out = await buildRowsFromSnapshotAll({ cap, limit, session: "pre" });
     return res.status(out.status).json(out.body);
   }
+
   const out = await buildRowsFromAMCache({ cap, limit, session: "pre" });
   return res.status(out.status).json(out.body);
 });
@@ -1195,12 +1482,13 @@ app.get("/aftermarket", async (req, res) => {
     const out = await buildRowsFromSnapshotAll({ cap, limit, session: "after" });
     return res.status(out.status).json(out.body);
   }
+
   const out = await buildRowsFromAMCache({ cap, limit, session: "after" });
   return res.status(out.status).json(out.body);
 });
 
 // ============================================================================
-// SECTION 13 — UI (Top bar rounded + Symbols feature kept)
+// SECTION 13 — UI (unchanged logic: stepper + roller + hover mini-chart + risk)
 // ============================================================================
 function riskNoticeContent() {
   return {
@@ -1224,19 +1512,31 @@ function riskNoticeContent() {
 
 function renderUI() {
   const risk = riskNoticeContent();
-  const importantDefault = IMPORTANT_SYMBOLS || "NVDA,TSLA,AAPL";
 
+  const importantDefault = IMPORTANT_SYMBOLS || "NVDA,TSLA,AAPL,AMD,META";
+  const autoMs = UI_AUTO_REFRESH_MS;
+  const autoSec = Math.max(1, Math.round(autoMs / 1000));
+
+  const snapAllOn = ENABLE_SNAPSHOT_ALL ? "ON" : "OFF";
+  const vwapOn = ENABLE_5M_INDICATORS ? "ON" : "OFF";
+
+  const envMax = Number(process.env.SCAN_MAX_SYMBOLS || SCAN_MAX_SYMBOLS);
+  const hardMax = Number(process.env.SCAN_HARD_MAX || SCAN_HARD_MAX);
+  const initMax = Math.max(20, Math.min(hardMax, Number.isFinite(envMax) ? envMax : 200));
+
+  // NOTE: UI HTML/JS kept (signals not touched)
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${BRAND.name} Dashboard</title>
+<title>${BRAND?.name || "ALGTP™"} Dashboard</title>
 <style>
 :root{ color-scheme: dark; }
 body{ margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0d12; color:#e6e8ef; }
-.wrap{ max-width:1800px; margin:0 auto; padding:0 12px; }
+.wrap{ max-width:1900px; margin:0 auto; padding:0 12px; }
 header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: blur(10px); border-bottom:1px solid rgba(255,255,255,.08); z-index:20; }
+
 .brandRow{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; }
 .brandTitle{ display:flex; align-items:center; gap:10px; }
 .brandMark{ font-size:18px; }
@@ -1244,6 +1544,11 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
 .brandSub{ font-size:12px; color:#a7adc2; margin-top:3px; }
 
 .pill{
+  font-size:12px; padding:7px 12px; border-radius:999px;
+  background:#121622; border:1px solid rgba(255,255,255,.12);
+  color:#c8cde0; white-space:nowrap;
+}
+.tag{
   font-size:12px; padding:7px 12px; border-radius:999px;
   background:#121622; border:1px solid rgba(255,255,255,.12);
   color:#c8cde0; white-space:nowrap;
@@ -1259,82 +1564,128 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
 
 .err{ white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; color:#ffb4b4; background:#1a0f12; border:1px solid rgba(255,128,128,.25); border-radius:12px; padding:10px 12px; margin-top:12px; display:none; }
 
-/* ===== TOP BAR (rounded like you want) ===== */
-.topBar{
-  display:flex; align-items:center; justify-content:space-between;
-  gap:12px; flex-wrap:wrap;
-}
-.topBar .left{
-  display:flex; align-items:center; gap:10px;
-  flex:1; min-width: 520px;
-}
-.topBar .right{
-  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
-}
-.tag{
-  font-size:12px; padding:7px 12px; border-radius:999px;
-  background:#121622; border:1px solid rgba(255,255,255,.12);
-  color:#c8cde0; white-space:nowrap;
-}
+/* ===== TOP BAR ===== */
+.topBar{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.topBar .left{ display:flex; align-items:center; gap:10px; flex:1; min-width: 720px; flex-wrap:wrap; }
+.topBar .right{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+
 .symbolsInput{
-  flex:1; min-width:380px;
+  flex:1; min-width:520px;
   background:#0f1320; border:1px solid rgba(255,255,255,.14);
   border-radius:16px;
   padding:11px 14px;
   color:#e6e8ef;
 }
-.hintMini{
-  font-size:12px; color:#a7adc2; white-space:nowrap;
+.hintMini{ font-size:12px; color:#a7adc2; white-space:nowrap; }
+
+.btnTiny{
+  font-size:12px;
+  padding:7px 10px;
+  border-radius:999px;
+  background:#121622;
+  border:1px solid rgba(255,255,255,.12);
+  color:#c8cde0;
+  cursor:pointer;
+  user-select:none;
 }
-@media (max-width: 900px){
-  .topBar .left{ min-width:100%; }
-  .hintMini{ display:none; }
+.btnTiny:hover{ border-color: rgba(255,255,255,.22); }
+
+.stepper{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 10px;
+  border-radius:999px;
+  background:#121622;
+  border:1px solid rgba(255,255,255,.12);
+  color:#c8cde0;
+}
+.stepper label{ font-size:12px; color:#a7adc2; }
+.stepper input{
+  width:72px;
+  background:#0f1320;
+  border:1px solid rgba(255,255,255,.14);
+  border-radius:12px;
+  padding:7px 10px;
+  color:#e6e8ef;
+  outline:none;
+  font-size:12px;
+}
+.stepBtns{ display:flex; gap:6px; }
+.stepBtn{
+  width:28px; height:28px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,.12);
+  background:#0f1320;
+  color:#e6e8ef;
+  cursor:pointer;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  user-select:none;
+}
+.stepBtn:hover{ border-color: rgba(255,255,255,.22); }
+
+@media (max-width: 1050px){
+  .symbolsInput{ min-width:100%; }
 }
 
-/* ===== GRID ===== */
-.grid{
-  display:grid;
-  grid-template-columns: repeat(12, 1fr);
+/* ===== SYMBOLS ROLLER ===== */
+.rollerWrap{
+  margin-top:10px;
+  border:1px solid rgba(255,255,255,.10);
+  background:#0f1320;
+  border-radius:14px;
+  padding:8px 10px;
+}
+.rollerHead{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:8px;
+}
+.rollerTitle{ font-size:12px; font-weight:900; color:#c8cde0; }
+.rollerHint{ font-size:12px; color:#a7adc2; }
+.roller{
+  display:flex;
   gap:8px;
-  padding:12px 0 18px;
+  overflow-x:auto;
+  padding-bottom:4px;
+  scrollbar-width: thin;
 }
-.box{
-  grid-column: span 3;
-  border:1px solid rgba(255,255,255,.14);
-  border-radius:10px;
-  overflow:hidden;
-  background:#0b0d12;
-  min-height:180px;
+.chip{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 10px;
+  border-radius:999px;
+  background:#121622;
+  border:1px solid rgba(255,255,255,.12);
+  color:#e6e8ef;
+  font-size:12px;
+  white-space:nowrap;
+  cursor:pointer;
+  user-select:none;
 }
+.chip:hover{ border-color: rgba(255,255,255,.22); }
+.chip small{ color:#a7adc2; font-size:11px; }
+
+/* ===== GRID ===== */
+.grid{ display:grid; grid-template-columns: repeat(12, 1fr); gap:8px; padding:12px 0 18px; }
+.box{ grid-column: span 3; border:1px solid rgba(255,255,255,.14); border-radius:10px; overflow:hidden; background:#0b0d12; min-height:180px; }
 .box.cols2{ grid-column: span 4; }
 .box.cols3{ grid-column: span 4; }
 .box.cols4{ grid-column: span 6; }
 .box.cols6{ grid-column: span 12; }
 
-.boxHead{
-  background:#121622;
-  border-bottom:1px solid rgba(255,255,255,.10);
-  padding:6px 10px;
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  font-weight:900;
-  font-size:12px;
-  letter-spacing:.3px;
-}
+.boxHead{ background:#121622; border-bottom:1px solid rgba(255,255,255,.10); padding:6px 10px; display:flex; align-items:center; justify-content:space-between; font-weight:900; font-size:12px; letter-spacing:.3px; }
 .boxMeta{ font-weight:600; font-size:11px; color:#a7adc2; }
-.boxBody{ overflow:auto; max-height:260px; }
+.boxBody{ overflow:auto; max-height:420px; }
 .box table{ width:100%; border-collapse:collapse; }
-.box th,.box td{
-  padding:6px 8px;
-  border-bottom:1px solid rgba(255,255,255,.06);
-  font-size:12px;
-  white-space:nowrap;
-}
+.box th,.box td{ padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.06); font-size:12px; white-space:nowrap; }
 .box th{ position:sticky; top:0; background:#0b0d12; color:#a7adc2; }
 .box tr:hover td{ background: rgba(255,255,255,.03); }
-
-.watermark{ position: fixed; bottom: 10px; right: 12px; font-size: 11px; color: rgba(230,232,239,.30); pointer-events:none; user-select:none; z-index:9999; }
 
 /* ===== Risk popup ===== */
 .riskBack{ position:fixed; inset:0; background: rgba(0,0,0,.72); display:none; align-items:center; justify-content:center; z-index:120; }
@@ -1347,6 +1698,8 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
 .riskFoot{ padding:12px 14px; display:flex; justify-content:flex-end; gap:10px; background:#0b0d12; border-top:1px solid rgba(255,255,255,.08); }
 .riskBtn{ cursor:pointer; border:1px solid rgba(255,255,255,.18); background:#121622; color:#e6e8ef; border-radius:12px; padding:10px 12px; font-size:13px; }
 .riskBtn:disabled{ opacity:.45; cursor:not-allowed; }
+
+.watermark{ position: fixed; bottom: 10px; right: 12px; font-size: 11px; color: rgba(230,232,239,.30); pointer-events:none; user-select:none; z-index:9999; }
 </style>
 </head>
 
@@ -1356,12 +1709,12 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
     <div class="brandRow">
       <div>
         <div class="brandTitle">
-          <span class="brandMark">${BRAND.mark}</span>
-          <span class="brandName">${BRAND.legal}</span>
+          <span class="brandMark">${BRAND?.mark || "🔥"}</span>
+          <span class="brandName">${BRAND?.legal || "ALGTP™"}</span>
         </div>
-        <div class="brandSub">Dashboard • Icons • VWAP • Open+Gap • Hover mini-chart • Click TV</div>
+        <div class="brandSub">Icons • VWAP • Open+Gap • Roller • Hover mini-chart</div>
       </div>
-      <div class="pill">Auto: <b>${Math.max(1, Math.round(UI_AUTO_REFRESH_MS/1000))}s</b></div>
+      <div class="pill">Auto: <b>${autoSec}s</b></div>
     </div>
   </div>
 </header>
@@ -1372,21 +1725,42 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
       <div class="left">
         <span class="tag">🔎 SYMBOLS</span>
         <input id="symbols" class="symbolsInput"
-               value="${importantDefault.replace(/"/g, "&quot;")}"
-               placeholder="Type symbols: NVDA,TSLA,AAPL (Enter)" />
-        <span class="hintMini">Enter → update IMPORTANT_STOCKS</span>
+               value="${String(importantDefault).replace(/"/g, "&quot;")}"
+               placeholder="Paste many symbols... (Enter)" />
+
+        <div class="stepper" title="Max symbols to scan from your list">
+          <label>Max</label>
+          <div class="stepBtns">
+            <div class="stepBtn" id="maxDown">−</div>
+            <div class="stepBtn" id="maxUp">+</div>
+          </div>
+          <input id="maxSymbols" type="number" min="20" max="${hardMax}" step="20" value="${initMax}" />
+        </div>
+
+        <button class="btnTiny" id="btnApply">Apply</button>
+        <button class="btnTiny" id="btnClear">Clear</button>
+        <span class="hintMini">Enter/Apply → update IMPORTANT_STOCKS</span>
       </div>
 
       <div class="right">
         <span class="pill" id="statusPill">Dashboard</span>
-        <span class="pill">Snapshot-All: <b>${ENABLE_SNAPSHOT_ALL ? "ON" : "OFF"}</b></span>
-        <span class="pill">Indicators: <b>${ENABLE_5M_INDICATORS ? "ON" : "OFF"}</b></span>
+        <span class="pill">Snapshot-All: <b>${snapAllOn}</b></span>
+        <span class="pill">VWAP: <b>${vwapOn}</b></span>
       </div>
     </div>
 
-    <div class="hint">
-      TOP MOVERS + LOSS MOVERS ở TOP LEFT • Icons & VWAP on • Open/GAP best-effort • Auto refresh running
+    <div class="rollerWrap">
+      <div class="rollerHead">
+        <div class="rollerTitle">SYMBOL ROLLER</div>
+        <div class="rollerHint">Scroll → hover chip = mini chart • click chip = TradingView</div>
+      </div>
+      <div class="roller" id="roller"></div>
     </div>
+
+    <div class="hint">
+      Paste 500–2000 symbols OK. Scanner will only scan “Max” symbols from the start of your list.
+    </div>
+
     <div class="err" id="errBox"></div>
   </div>
 </div>
@@ -1395,18 +1769,16 @@ header{ position:sticky; top:0; background:rgba(11,13,18,.92); backdrop-filter: 
   <div class="grid" id="grid"></div>
 </div>
 
-<div class="watermark">${BRAND.watermark}</div>
+<div class="watermark">${BRAND?.watermark || ""}</div>
 
 <!-- Risk popup -->
 <div class="riskBack" id="riskBack" aria-hidden="true">
   <div class="riskBox" role="dialog" aria-modal="true">
     <div class="riskTop"><div class="riskTitle">${risk.title}</div></div>
     <div class="riskBody">
-      <div style="font-weight:900; margin-bottom:6px;">${BRAND.legal}</div>
-
+      <div style="font-weight:900; margin-bottom:6px;">${BRAND?.legal || "ALGTP™"}</div>
       <div style="font-weight:900; margin-top:8px;">VI</div>
       <ul>${risk.vn.map((x)=>`<li>${x}</li>`).join("")}</ul>
-
       <div style="font-weight:900; margin-top:10px;">EN</div>
       <ul>${risk.en.map((x)=>`<li>${x}</li>`).join("")}</ul>
 
@@ -1431,18 +1803,15 @@ const byId = (id) => document.getElementById(id);
 const grid = byId("grid");
 const errBox = byId("errBox");
 const statusPill = byId("statusPill");
+const roller = byId("roller");
 
 let riskAccepted = false;
-
-// risk popup
 (function riskNotice(){
   const back = byId("riskBack");
   const agree = byId("riskAgree");
   const btn = byId("riskContinueBtn");
   const hint = byId("riskHint");
-
   back.style.display = "flex";
-  agree.checked = false;
   btn.disabled = true;
 
   agree.addEventListener("change", () => {
@@ -1477,7 +1846,6 @@ function fmtInt(x){
   return Math.round(nn).toLocaleString();
 }
 
-// TradingView click
 function tvUrlFor(sym){
   return "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent("NASDAQ:" + sym) + "&interval=5";
 }
@@ -1571,24 +1939,27 @@ function bindMiniHover(){
   });
 }
 
-// ===== dashboard sections (TOP LEFT movers/losers) =====
-let importantSymbols = ${JSON.stringify(importantDefault)};
+// ===== Dashboard sections =====
+let importantSymbols = byId("symbols").value || "";
+let scanMax = Number(byId("maxSymbols").value || 200);
+
 const REFRESH_MS = ${UI_AUTO_REFRESH_MS};
 
 const SECTIONS = [
-  // TOP LEFT
-  { id:"top_movers",  title:"TOP MOVERS",  url:"/list?group=topGainers&cap=all&limit=80", cols:2, limit:6, sort:"pctDesc" },
-  { id:"loss_movers", title:"LOSS MOVERS", url:"/list?group=topLosers&cap=all&limit=80",  cols:2, limit:6, sort:"pctAsc" },
+  { id:"top_movers",  title:"TOP MOVERS",  url:"/list?group=topGainers&cap=all&limit=120", cols:2, limit:10, sort:"pctDesc" },
+  { id:"loss_movers", title:"LOSS MOVERS", url:"/list?group=topLosers&cap=all&limit=120",  cols:2, limit:10, sort:"pctAsc" },
 
-  { id:"penny_gappers", title:"PENNY_GAPPERS", url:"/list?group=topGappers&cap=all&limit=120&minGap=10", cols:2, limit:6, sort:"gapDesc" },
-  { id:"important", title:"IMPORTANT_STOCKS", url:"/scan?symbols="+encodeURIComponent(importantSymbols), cols:2, limit:8, sort:"gapDesc" },
+  { id:"gappers", title:"GAPPERS", url:"/list?group=topGappers&cap=all&limit=200&minGap=5", cols:2, limit:10, sort:"gapDesc" },
+  { id:"penny_gappers", title:"PENNY_GAPPERS", url:"/list?group=topGappers&cap=small&limit=200&minGap=10", cols:2, limit:10, sort:"gapDesc" },
 
-  { id:"vwap", title:"VWAP", url:"/list?group=topGainers&cap=all&limit=120", cols:3, limit:6, sort:"vwapFocus" },
-  { id:"breaking_high", title:"BREAKING HIGH WITH VOLUME", url:"/list?group=topGainers&cap=all&limit=120", cols:3, limit:6, sort:"gapDesc" },
-  { id:"flush", title:"FLUSH", url:"/list?group=topLosers&cap=all&limit=120", cols:3, limit:6, sort:"gapDesc" },
+  // big box
+  { id:"important", title:"IMPORTANT_STOCKS", url:"/scan?symbols="+encodeURIComponent(importantSymbols)+"&max="+encodeURIComponent(scanMax), cols:6, limit:200, sort:"gapDesc" },
 
-  { id:"cheap", title:"CHEAP STOCKS", url:"/scan?symbols=XTKG,CCTG,CNTM,OPTT,SBEV", cols:3, limit:6, sort:"gapDesc" },
-  { id:"halts", title:"HALT", url:"/halts?only=all", cols:3, limit:10, type:"halts" },
+  { id:"vwap", title:"VWAP", url:"/list?group=topGainers&cap=all&limit=200", cols:3, limit:12, sort:"vwapFocus" },
+  { id:"main_momo", title:"MAIN MOMO", url:"/list?group=topGainers&cap=all&limit=200", cols:3, limit:12, sort:"gapDesc" },
+  { id:"momo360", title:"MOMO 360", url:"/list?group=topGainers&cap=all&limit=200", cols:3, limit:12, sort:"gapDesc" },
+
+  { id:"halts", title:"HALT", url:"/halts?only=all", cols:3, limit:60, type:"halts" },
 ];
 
 function boxHtml(sec){
@@ -1602,7 +1973,6 @@ function boxHtml(sec){
       <div class="boxBody" id="body_\${sec.id}"></div>
     </div>\`;
 }
-
 function renderGrid(){ grid.innerHTML = SECTIONS.map(boxHtml).join(""); }
 
 function sortRows(rows, mode){
@@ -1611,7 +1981,6 @@ function sortRows(rows, mode){
   if (mode==="pctDesc") return [...rows].sort((a,b)=> (safe(b.pricePct)??-1e18)-(safe(a.pricePct)??-1e18));
   if (mode==="pctAsc")  return [...rows].sort((a,b)=> (safe(a.pricePct)?? 1e18)-(safe(b.pricePct)?? 1e18));
   if (mode==="gapDesc") return [...rows].sort((a,b)=> (safe(b.gapPct)??-1e18)-(safe(a.gapPct)??-1e18));
-
   if (mode==="vwapFocus"){
     return [...rows].sort((a,b)=>
       (Number(b.aboveVWAP_5m&&b.volSpike_5m)-Number(a.aboveVWAP_5m&&a.volSpike_5m)) ||
@@ -1619,13 +1988,11 @@ function sortRows(rows, mode){
       (safe(b.gapPct)??-1e18)-(safe(a.gapPct)??-1e18)
     );
   }
-
   return rows;
 }
 
 function rowsTable(rowsRaw, sec){
-  const rows = sortRows(rowsRaw, sec.sort).slice(0, sec.limit ?? 6);
-
+  const rows = sortRows(rowsRaw, sec.sort).slice(0, sec.limit ?? 12);
   return \`
   <table>
     <thead>
@@ -1667,29 +2034,47 @@ function rowsTable(rowsRaw, sec){
 }
 
 function haltsTable(rows){
-  const top = rows.slice(0, 30);
+  const top = rows.slice(0, 120);
   return \`
   <table>
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th>Time</th>
-        <th>Description</th>
-      </tr>
-    </thead>
+    <thead><tr><th>Symbol</th><th>Time</th><th>Status</th></tr></thead>
     <tbody>
       \${top.map(x=>{
         const t = x.tsMs ? new Date(x.tsMs).toLocaleTimeString() : "-";
-        const desc = x.halted ? "Halted" : "Resumed";
-        return \`
-          <tr>
-            <td class="mono">\${x.symbol||""}</td>
-            <td class="mono">\${t}</td>
-            <td>\${desc}</td>
-          </tr>\`;
+        const desc = x.halted ? "HALT" : "RESUME";
+        return \`<tr><td class="mono">\${x.symbol||""}</td><td class="mono">\${t}</td><td>\${desc}</td></tr>\`;
       }).join("")}
     </tbody>
   </table>\`;
+}
+
+function renderRoller(symbols){
+  const list = String(symbols||"")
+    .replace(/\\n/g,",")
+    .split(",")
+    .map(s=>s.trim().toUpperCase())
+    .filter(Boolean);
+
+  roller.innerHTML = list.slice(0, 2000).map(sym => {
+    const safe = sym.replace(/'/g,"");
+    return \`<div class="chip" data-sym="\${safe}">\${safe} <small>hover</small></div>\`;
+  }).join("");
+
+  roller.querySelectorAll(".chip").forEach(ch => {
+    const sym = ch.getAttribute("data-sym");
+    ch.addEventListener("mouseenter",(ev)=>{
+      clearTimeout(hoverTimer);
+      hoverTimer=setTimeout(()=>showMini(ev, sym),120);
+    });
+    ch.addEventListener("mousemove",(ev)=>{
+      if (miniBox && miniBox.style.display==="block") posMini(ev);
+    });
+    ch.addEventListener("mouseleave",()=>{
+      clearTimeout(hoverTimer);
+      hideMini();
+    });
+    ch.addEventListener("click",()=> window.open(tvUrlFor(sym), "_blank", "noopener,noreferrer"));
+  });
 }
 
 async function loadSection(sec){
@@ -1712,7 +2097,7 @@ async function loadSection(sec){
     if (sec.type==="halts"){
       const rows = Array.isArray(j.results) ? j.results : [];
       body.innerHTML = haltsTable(rows);
-    }else{
+    } else {
       const rows = Array.isArray(j.results) ? j.results : [];
       body.innerHTML = rowsTable(rows, sec);
       bindMiniHover();
@@ -1728,25 +2113,73 @@ function loadAll(){
   for (const sec of SECTIONS) loadSection(sec);
 }
 
-// Symbols feature kept: Enter => refresh IMPORTANT_STOCKS only
-(function bindSymbolsSearch(){
+// ===== Apply changes (symbols + max) =====
+function applyImportant(){
   const input = byId("symbols");
-  if (!input) return;
+  const maxInput = byId("maxSymbols");
+
+  importantSymbols = String(input.value||"").trim();
+  scanMax = Number(maxInput.value || 200);
+  if (!Number.isFinite(scanMax)) scanMax = 200;
+  scanMax = Math.max(20, Math.min(${hardMax}, Math.floor(scanMax)));
+
+  maxInput.value = String(scanMax);
+  renderRoller(importantSymbols);
+
+  const sec = SECTIONS.find(s=>s.id==="important");
+  if (!sec) return;
+
+  sec.url = "/scan?symbols=" + encodeURIComponent(importantSymbols) + "&max=" + encodeURIComponent(scanMax);
+  loadSection(sec);
+
+  statusPill.textContent = "Updated";
+  setTimeout(()=>statusPill.textContent="Dashboard", 900);
+}
+
+(function bindControls(){
+  const input = byId("symbols");
+  const maxInput = byId("maxSymbols");
+  const btnApply = byId("btnApply");
+  const btnClear = byId("btnClear");
+  const maxUp = byId("maxUp");
+  const maxDown = byId("maxDown");
+
+  renderRoller(importantSymbols);
+
+  btnApply.addEventListener("click", applyImportant);
+
+  btnClear.addEventListener("click", ()=>{
+    input.value = "";
+    input.focus();
+    renderRoller("");
+    statusPill.textContent = "Cleared";
+    setTimeout(()=>statusPill.textContent="Dashboard", 600);
+  });
 
   input.addEventListener("keydown",(e)=>{
-    if (e.key !== "Enter") return;
-    const val = String(input.value||"").trim();
-    if (!val) return;
+    if (e.key === "Enter") applyImportant();
+  });
 
-    importantSymbols = val;
-    const sec = SECTIONS.find(s=>s.id==="important");
-    if (!sec) return;
+  const step = 20;
 
-    sec.url = "/scan?symbols=" + encodeURIComponent(importantSymbols);
-    loadSection(sec);
+  maxUp.addEventListener("click", ()=>{
+    let v = Number(maxInput.value || 200);
+    if (!Number.isFinite(v)) v = 200;
+    v = Math.min(${hardMax}, v + step);
+    maxInput.value = String(v);
+    applyImportant();
+  });
 
-    statusPill.textContent = "Updated";
-    setTimeout(()=>statusPill.textContent="Dashboard", 900);
+  maxDown.addEventListener("click", ()=>{
+    let v = Number(maxInput.value || 200);
+    if (!Number.isFinite(v)) v = 200;
+    v = Math.max(20, v - step);
+    maxInput.value = String(v);
+    applyImportant();
+  });
+
+  maxInput.addEventListener("change", ()=>{
+    applyImportant();
   });
 })();
 
@@ -1761,7 +2194,6 @@ setInterval(()=>{
   if (miniBox && miniBox.style.display==="block") return;
   loadAll();
 }, REFRESH_MS);
-
 </script>
 </body>
 </html>`;

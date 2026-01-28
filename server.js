@@ -1,6 +1,4 @@
 
-best scanner ema,sma,vwap
-
 
 
 

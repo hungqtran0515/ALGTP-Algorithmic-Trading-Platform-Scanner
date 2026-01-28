@@ -1,5 +1,3 @@
-
-
 // ============================================================================
 // 🔥 ALGTP™ — Massive Scanner (REST + WS HALT + WS AM fallback + Mini Chart Hover)
 // Single-file Node.js (ESM)
